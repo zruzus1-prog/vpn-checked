@@ -79,7 +79,7 @@ class ProbeTests(unittest.TestCase):
         process=Mock(); process.poll.return_value=None
         with patch('checker.resolve_public',return_value='8.8.8.8'), patch('checker.subprocess.Popen',return_value=process), patch('checker.time.sleep'), patch('checker.curl',side_effect=[(204,0,.1),(204,0,.2),(200,c.DOWNLOAD_BYTES,4)]+[(204,0,.2)]*3+[(200,c.DOWNLOAD_BYTES,4),(200,100,1,'<title>YouTube</title>ytInitialData ytcfg.set'),(403,100,1,'blocked')]):
             result,line=c.probe(VLESS,'/fake/core',c.time.monotonic()+180)
-        self.assertFalse(result['qualified']); self.assertTrue(result['baseline_qualified']); self.assertIn('checked',line)
+        self.assertFalse(result['qualified']); self.assertTrue(result['baseline_qualified']); self.assertIn('VLESS',line)
         self.assertEqual(result['reachability']['chatgpt'],'http-403')
         self.assertEqual(result['median_ms'],200)
         process.terminate.assert_called_once()

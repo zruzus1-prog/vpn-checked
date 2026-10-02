@@ -147,7 +147,11 @@ class StrengthenedTests(unittest.TestCase):
     def artifact(self,path):
         result,line,*_=self.run_probe()
         for filename in c.FEEDS.values(): (path/filename).write_text(line+'\n')
-        report={'schema_version':2,'completed_at':datetime.now(timezone.utc).isoformat(),
+        with patch('checker.download_feed',return_value=URI):
+            _,_,sources,stats=c.collect_candidates()
+        report={'schema_version':3,**stats,'sources':sources,
+                'coverage':c.coverage_summary(sources,1,[result]),
+                'completed_at':datetime.now(timezone.utc).isoformat(),
                 'sampled':1,'deep_tested':1,'qualified':1,
                 'feed_counts':{key:1 for key in c.FEEDS},'results':[result]}
         (path/'report.json').write_text(json.dumps(report))

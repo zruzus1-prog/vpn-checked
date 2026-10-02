@@ -9,7 +9,6 @@ import ipaddress
 import json
 import os
 from pathlib import Path
-import random
 import re
 import socket
 import secrets
@@ -20,6 +19,7 @@ import tempfile
 import threading
 import time
 import urllib.parse as U
+import unicodedata
 from datetime import datetime, timezone
 
 SOURCES = [
@@ -27,18 +27,39 @@ SOURCES = [
  'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt',
  'https://raw.githubusercontent.com/Diversan313/apex-parser/main/subs/main/alive_bl.txt',
 ]
-MAX_CANDIDATES = 150
+MAX_CANDIDATES = 512
 WORKERS = 4
-BUDGET = 1020
-MAX_DEEP = 32
+BUDGET = 90 * 60
+MAX_DEEP = 512
 STABILITY_SECONDS = 45
 DOWNLOAD_BYTES = 2 * 1024 * 1024
 MIN_BYTES_PER_SECOND = 256 * 1024
 FEEDS = {"both": "subscription.txt", "chatgpt": "subscription-gpt.txt", "youtube": "subscription-youtube.txt"}
 MAX_FEED = 4 * 1024 * 1024
+MAX_FEED_LINES = 20000
 CIPHERS = {'aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305'}
+PROTOCOLS = {'vless', 'vmess', 'trojan', 'hysteria2', 'shadowsocks'}
+PARSER_REASONS = {
+    'oversize', 'base64', 'unsafe string', 'host', 'vmess JSON', 'vmess object',
+    'vmess numeric field', 'vmess string field', 'unsupported vmess',
+    'unsupported scheme', 'ambiguous credentials', 'duplicate option',
+    'unsupported option', 'unsupported ss', 'obfs', 'encryption', 'flow',
+    'port', 'security', 'TLS required', 'alpn', 'fingerprint', 'reality',
+    'transport', 'path', 'unsupported ss plugin', 'unsafe obfs host',
+    'packet encoding', 'header type', 'hy2 bandwidth',
+}
+REJECTION_CATEGORIES = {x.lower().replace(' ', '-') for x in PARSER_REASONS} | {
+    'insecure-tls-requested', 'malformed',
+}
+RESULT_FAILURE_REASONS = {'budget', 'endpoint-rejected', 'core-start-failed',
+    'quick-https-failed', 'deep-budget', 'throughput-failed', 'stability-failed',
+    'service-failed', 'services-not-confirmed'}
 
 class Rejected(ValueError):
+    pass
+
+class BudgetExceeded(Rejected):
+    """A run deadline is incomplete coverage, never evidence of a bad node."""
     pass
 
 def b64(s):
@@ -87,6 +108,32 @@ def resolve_public(server):
         raise Rejected('nonpublic endpoint')
     return sorted(ips, key=lambda x: (':' in x, x))[0]
 
+def ss_plugin(value):
+    """A narrow built-in sing-box obfs-local adapter, never an executable name.
+
+    The TLS-obfs host is opaque camouflage data, not a DNS/certificate host.
+    Preserve its bytes. Only the separately validated server is ever dialled.
+    Reference: SagerNet/sing-box v1.14.2 transport/sip003/obfs.go and plugin.go.
+    """
+    value=clean(value,1024)
+    if '\\' in value: raise Rejected('unsupported ss plugin')
+    parts=value.split(';')
+    if len(parts)!=3 or parts[0]!='obfs-local': raise Rejected('unsupported ss plugin')
+    options={}
+    for part in parts[1:]:
+        if part.count('=')!=1: raise Rejected('unsupported ss plugin')
+        key,item=part.split('=',1)
+        if key in options: raise Rejected('unsupported ss plugin')
+        options[key]=item
+    if set(options)!={'obfs','obfs-host'} or options['obfs']!='tls':
+        raise Rejected('unsupported ss plugin')
+    camouflage=clean(options['obfs-host'],253)
+    if (not camouflage or len(camouflage.encode('utf-8'))>253 or
+            any(unicodedata.category(char).startswith('C') or
+                unicodedata.category(char) in ('Zl','Zp') for char in camouflage)):
+        raise Rejected('unsafe obfs host')
+    return {'plugin':'obfs-local','plugin_opts':'obfs=tls;obfs-host='+camouflage}
+
 def parse_uri(uri):
     clean(uri, 8192)
     u = U.urlsplit(uri)
@@ -121,27 +168,46 @@ def parse_uri(uri):
             raise Rejected('duplicate option')
         q = dict(pairs)
         allowed = {'security','sni','peer','type','host','path','fp','alpn','pbk','sid','flow','encryption','obfs','obfs-password'}
+        if scheme == 'ss': allowed = {'plugin'}
+        elif scheme == 'vless': allowed |= {'packetEncoding','headerType','headertype'}
+        elif scheme in ('hy2','hysteria2'): allowed |= {'upmbps'}
         if set(q) - allowed:
             raise Rejected('unsupported option')
         if scheme == 'ss':
             auth = U.unquote(u.netloc.rsplit('@',1)[0])
             if ':' not in auth: auth = b64(auth)
             method, password = auth.split(':', 1)
-            if method not in CIPHERS or q:
+            if method not in CIPHERS:
                 raise Rejected('unsupported ss')
             out = {'type':'shadowsocks', 'method':method, 'password':clean(password)}
+            if 'plugin' in q: out.update(ss_plugin(q['plugin']))
+            q = {}
         elif scheme == 'trojan':
             out = {'type':'trojan','password':clean(U.unquote(u.username or ''))}
             q.setdefault('security', 'tls')
         elif scheme in ('hy2','hysteria2'):
-            out = {'type':'hysteria2','password':clean(U.unquote(u.netloc.rsplit('@',1)[0]))}
+            # sing-box v1.14.2 option.Hysteria2OutboundOptions.UpMbps defaults to
+            # zero. Only this no-bandwidth-override form is supported here.
+            if q.get('upmbps','0')!='0': raise Rejected('hy2 bandwidth')
+            out = {'type':'hysteria2','password':clean(U.unquote(u.netloc.rsplit('@',1)[0])),
+                   'up_mbps':0}
             q.setdefault('security','tls')
             if q.get('obfs'):
                 if q['obfs'] != 'salamander' or not q.get('obfs-password'): raise Rejected('obfs')
                 out['obfs'] = {'type':'salamander','password':clean(q['obfs-password'])}
         else:
-            out = {'type':'vless','uuid':U.unquote(u.username or '')}
+            # v1.14.2 protocol/vless/outbound.go: absent -> xudp, explicit empty
+            # disables packet encoding. Preserve that meaningful distinction.
+            packet_encoding=q.get('packetEncoding','xudp')
+            if packet_encoding not in ('','packetaddr','xudp'): raise Rejected('packet encoding')
+            out = {'type':'vless','uuid':U.unquote(u.username or ''),'packet_encoding':packet_encoding}
             if q.get('encryption','none') != 'none': raise Rejected('encryption')
+            header_keys=set(q)&{'headerType','headertype'}
+            # Xray v25.3.6 transport_internet.go defines none as a no-op and
+            # raw as the tcp alias; do not generalize to http/other headers.
+            if header_keys and (len(header_keys)!=1 or q[next(iter(header_keys))]!='none' or
+                                q.get('type','tcp') not in ('tcp','raw')):
+                raise Rejected('header type')
             if q.get('flow'):
                 if q['flow'] != 'xtls-rprx-vision': raise Rejected('flow')
                 out['flow'] = q['flow']
@@ -169,6 +235,7 @@ def parse_uri(uri):
             tls.setdefault('utls', {'enabled':True,'fingerprint':'chrome'})
         out['tls'] = tls
     transport = q.get('type','tcp')
+    if out['type']=='vless' and transport=='raw': transport='tcp'
     if transport not in ('tcp','ws'): raise Rejected('transport')
     if out['type'] == 'hysteria2' and transport != 'tcp': raise Rejected('transport')
     if transport == 'ws':
@@ -183,7 +250,9 @@ def feed_lines(text):
     if len(text.encode()) > MAX_FEED: raise Rejected('feed too large')
     if '://' not in text:
         text = b64(''.join(text.split()))
-    return [s.strip() for s in text.splitlines() if '://' in s][:20000]
+    lines = [s.strip() for s in text.splitlines() if '://' in s]
+    if len(lines) > MAX_FEED_LINES: raise Rejected('too many feed lines')
+    return lines
 
 def configuration(out, port, password="test-only"):
     return {'log':{'disabled':True},'inbounds':[{'type':'socks','tag':'in','listen':'127.0.0.1','listen_port':port,'users':[{'username':'checker','password':password}]}], 'outbounds':[out], 'route':{'final':'proxy'}}
@@ -318,6 +387,45 @@ def service_label(name,status,body):
     return service_assessment(name,status,body)['label']
 
 
+def safe_source_label(value, limit=36):
+    """Keep a compact plain-text source name; remove controls, bidi and markup."""
+    if not isinstance(value,str): return ''
+    value=unicodedata.normalize('NFC',value)
+    allowed_punctuation=set(' .,-_|()[]')
+    value=''.join(char if (unicodedata.category(char)[0] in 'LMN' or
+                         unicodedata.category(char)=='So' or char in allowed_punctuation)
+                  else ' ' for char in value)
+    value=' '.join(value.split())
+    if len(value)>limit:
+        value=value[:limit-1].rstrip()
+        # Do not leave half a country-flag pair at a truncation boundary.
+        regional=0
+        for char in reversed(value):
+            if '\U0001f1e6'<=char<='\U0001f1ff': regional+=1
+            else: break
+        if regional%2: value=value[:-1]
+        value=value.rstrip()+'…'
+    return value
+
+
+def source_name(uri):
+    u=U.urlsplit(uri)
+    name=U.unquote(u.fragment)
+    if not name and u.scheme.lower()=='vmess':
+        try: name=json.loads(b64(u.netloc+u.path)).get('ps','')
+        except (ValueError,AttributeError,RecursionError): name=''
+    return safe_source_label(name)
+
+
+def export_with_label(uri,result):
+    """Only the URI fragment changes; transport/authentication bytes stay intact."""
+    name=source_name(uri) or 'Страна не указана'
+    protocol={'ss':'SS','vless':'VLESS','vmess':'VMess','trojan':'Trojan',
+              'hy2':'HY2','hysteria2':'HY2'}[U.urlsplit(uri).scheme.lower()]
+    label=f"{name} · {protocol} · {result['id'][:6]}"
+    return uri.split('#',1)[0]+'#'+U.quote(label,safe='')
+
+
 def probe(uri, core, deadline, deep_budget=None):
     result = {'id':hashlib.sha256(uri.encode()).hexdigest()[:16], 'qualified':False,
               'baseline_qualified':False, 'service_qualified':{'youtube':False,'chatgpt':False}}
@@ -325,8 +433,9 @@ def probe(uri, core, deadline, deep_budget=None):
     proc = None; phase='endpoint-rejected'
     try:
         out = parse_uri(uri)
+        result['protocol'] = out['type']
         out['server'] = resolve_public(out['server'])
-        if time.monotonic() + 10 >= deadline: raise Rejected('budget')
+        if time.monotonic() + 10 >= deadline: raise BudgetExceeded('budget')
         with socket.socket() as s:
             s.bind(('127.0.0.1',0)); port = s.getsockname()[1]
         with tempfile.TemporaryDirectory() as td:
@@ -342,7 +451,7 @@ def probe(uri, core, deadline, deep_budget=None):
             timings=[]
             def request(url, **kwargs):
                 timeout = kwargs.get('timeout', 5)
-                if time.monotonic() + timeout + 2 >= deadline: raise Rejected('deadline')
+                if time.monotonic() + timeout + 2 >= deadline: raise BudgetExceeded('deadline')
                 if proc.poll() is not None: raise Rejected('core stopped')
                 return curl(url, port, password=password, **kwargs)
             def https_check(url):
@@ -352,7 +461,7 @@ def probe(uri, core, deadline, deep_budget=None):
             for url in ('https://www.gstatic.com/generate_204','https://cp.cloudflare.com/generate_204'):
                 https_check(url)
             phase='deep-budget'
-            if time.monotonic() + 100 >= deadline: raise Rejected('budget')
+            if time.monotonic() + 100 >= deadline: raise BudgetExceeded('budget')
             if deep_budget is not None and not deep_budget.claim(): raise Rejected('deep cap')
             result['deep_tested']=True
             stable_start=time.monotonic()
@@ -370,7 +479,7 @@ def probe(uri, core, deadline, deep_budget=None):
                                (30,'https://cp.cloudflare.com/generate_204'),
                                (STABILITY_SECONDS,'https://www.gstatic.com/generate_204')):
                 target=stable_start+offset
-                if target + 7 >= deadline: raise Rejected('deadline')
+                if target + 7 >= deadline: raise BudgetExceeded('deadline')
                 time.sleep(max(0,target-time.monotonic()))
                 https_check(url)
             phase='throughput-failed'
@@ -385,6 +494,8 @@ def probe(uri, core, deadline, deep_budget=None):
                     code,_,_,body = request(url,timeout=8,limit=2*1024*1024,body=True)
                     diagnostics[name] = service_assessment(name,code,body)
                     labels[name] = diagnostics[name]['label']
+                except BudgetExceeded:
+                    raise
                 except (Rejected,subprocess.TimeoutExpired):
                     labels[name]='not-confirmed'
                     diagnostics[name]={'label':'not-confirmed','http_status':None,'blocking_signals':[],
@@ -395,14 +506,13 @@ def probe(uri, core, deadline, deep_budget=None):
             if not any(services.values()):
                 result['reason']='services-not-confirmed'
                 return result,None
-            label = f"checked {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%MZ')} {result['id']} {result['median_ms']}ms {result['min_kib_s']}KiBps YT:{labels['youtube']} GPT:{labels['chatgpt']}"
-            exported=uri.split('#',1)[0]+'#'+U.quote(label)
+            exported=export_with_label(uri,result)
             result['subscription_sha256']=hashlib.sha256(exported.encode()).hexdigest()
             return result,exported
-    except (ValueError,KeyError,TypeError,OSError,subprocess.TimeoutExpired):
+    except (ValueError,KeyError,TypeError,OSError,subprocess.TimeoutExpired) as exc:
         result['qualified']=False
         result['service_qualified']={'youtube':False,'chatgpt':False}
-        result['reason']=phase
+        result['reason']='budget' if isinstance(exc,BudgetExceeded) else phase
         return result,None
     finally:
         if proc:
@@ -415,35 +525,106 @@ def download_feed(url):
     if p.returncode or len(p.stdout)>MAX_FEED: raise Rejected('feed download')
     return p.stdout.decode('utf-8-sig')
 
+def rejection_category(uri, error):
+    """Return only fixed categories; exception text can contain credentials."""
+    try:
+        u=U.urlsplit(uri)
+        options=json.loads(b64(u.netloc+u.path)) if u.scheme=='vmess' else dict(U.parse_qsl(u.query))
+        if isinstance(options,dict) and any(
+            key in options and str(options[key]).lower() not in ('0','false','')
+            for key in ('insecure','allowInsecure','skip-cert-verify')):
+            return 'insecure-tls-requested'
+    except (ValueError,TypeError,RecursionError):
+        pass
+    reason=str(error)
+    return reason.lower().replace(' ','-') if reason in PARSER_REASONS else 'malformed'
+
+
+def collect_candidates():
+    """Read every bounded source; deduplicate effective configurations, not names."""
+    normalized={}; provenance={}; sources=[]; raw_unique=set()
+    for url in SOURCES:
+        try:
+            lines=feed_lines(download_feed(url))
+            local={}; supported=0; reasons=Counter(); protocols=Counter()
+            raw_unique.update(lines)
+            for line in lines:
+                scheme=line.split('://',1)[0].lower()
+                protocol={'ss':'shadowsocks','hy2':'hysteria2'}.get(scheme,scheme)
+                protocols[protocol if protocol in PROTOCOLS else 'other']+=1
+                try:
+                    parsed=parse_uri(line)
+                    key=json.dumps(parsed,sort_keys=True,separators=(',',':'))
+                    local[key]=parsed
+                    normalized.setdefault(key,line)
+                    provenance.setdefault(key,[])
+                    if url not in provenance[key]: provenance[key].append(url)
+                    supported+=1
+                except (ValueError,KeyError,TypeError) as exc:
+                    reasons[rejection_category(line,exc)]+=1
+            sources.append({'url':url,'downloaded':True,'lines':len(lines),
+                'raw_unique_lines':len(set(lines)), 'supported_lines':supported,
+                'unique_candidates':len(local),
+                'unique_endpoints':len({(p['type'],p['server'],p['server_port']) for p in local.values()}),
+                'duplicate_supported_lines':supported-len(local),
+                'unsupported_or_rejected_lines':sum(reasons.values()),
+                'rejection_categories':dict(reasons), 'raw_protocol_counts':dict(protocols),
+                'supported_protocol_counts':dict(Counter(p['type'] for p in local.values()))})
+        except (ValueError,OSError,subprocess.TimeoutExpired):
+            sources.append({'url':url,'downloaded':False,'reason':'source-unavailable-or-invalid'})
+    available=[s for s in sources if s['downloaded']]
+    parsed=[json.loads(key) for key in normalized]
+    supported=sum(s['supported_lines'] for s in available)
+    stats={'raw_lines':sum(s['lines'] for s in available),'raw_unique_lines':len(raw_unique),
+           'supported_lines':supported,'unique_candidates':len(normalized),
+           'unique_endpoints':len({(p['type'],p['server'],p['server_port']) for p in parsed}),
+           'duplicate_supported_lines':supported-len(normalized),
+           'cross_source_duplicate_candidates':sum(s['unique_candidates'] for s in available)-len(normalized),
+           'unsupported_or_rejected_lines':sum(s['unsupported_or_rejected_lines'] for s in available),
+           'candidate_protocol_counts':dict(Counter(p['type'] for p in parsed))}
+    return normalized,provenance,sources,stats
+
+
+def select_candidates(normalized):
+    # Hash the canonical effective configuration: source order/name changes cannot
+    # change scheduling. A cap is explicit incompleteness, never random coverage.
+    keys=sorted(normalized,key=lambda key:(hashlib.sha256(key.encode()).digest(),key))
+    return [normalized[key] for key in keys[:MAX_CANDIDATES]]
+
+
+def coverage_summary(sources, total, results):
+    skipped_deadline=sum(r.get('reason')=='budget' for r in results)
+    skipped_deep=sum(r.get('reason')=='deep-budget' for r in results)
+    cap_skipped=total-len(results)
+    available=sum(s['downloaded'] is True for s in sources)
+    complete=(available==len(SOURCES) and len(sources)==len(SOURCES) and
+              cap_skipped==0 and skipped_deadline==0 and skipped_deep==0)
+    return {'scope':'parser-supported-unique-configurations',
+            'selection':'deterministic-normalized-sha256',
+            'sources_expected':len(SOURCES),'sources_available':available,
+            'selected_candidates':len(results),
+            'completed_assessments':len(results)-skipped_deadline-skipped_deep,
+            'candidate_cap_skipped':cap_skipped,'deadline_skipped':skipped_deadline,
+            'deep_cap_skipped':skipped_deep,'complete_supported':complete}
+
+
 def main():
     start = datetime.now(timezone.utc).isoformat(); deadline=time.monotonic()+BUDGET
     output=Path('public'); output.mkdir(exist_ok=True)
     # Clear in this run before fetching; never carry forward last run's nodes.
     for filename in FEEDS.values(): (output/filename).write_text('')
-    candidates=[]; sources=[]; normalized={}; provenance={}; rejected=0
-    for url in SOURCES:
-        try:
-            lines=feed_lines(download_feed(url))
-            for line in lines:
-                try:
-                    key=json.dumps(parse_uri(line),sort_keys=True,separators=(',',':'))
-                    normalized.setdefault(key,line)
-                    provenance.setdefault(key,[])
-                    if url not in provenance[key]: provenance[key].append(url)
-                except (ValueError,KeyError,TypeError): rejected+=1
-            sources.append({'url':url,'downloaded':True,'lines':len(lines)})
-        except (ValueError,OSError,subprocess.TimeoutExpired): sources.append({'url':url,'downloaded':False})
+    normalized,provenance,sources,stats=collect_candidates()
     if not any(source['downloaded'] for source in sources): raise RuntimeError('all sources unavailable; do not publish')
-    candidates=list(normalized.values())
+    candidates=select_candidates(normalized)
     if not candidates: raise RuntimeError('no supported candidates; possible source format change; do not publish')
-    random.SystemRandom().shuffle(candidates)
-    total=len(candidates); candidates=candidates[:MAX_CANDIDATES]
     source_by_id={hashlib.sha256(uri.encode()).hexdigest()[:16]:provenance[json.dumps(parse_uri(uri),sort_keys=True,separators=(',',':'))] for uri in candidates}
-    results=[]; accepted={key:[] for key in FEEDS}; deep_budget=DeepBudget()
+    protocol_by_id={hashlib.sha256(uri.encode()).hexdigest()[:16]:parse_uri(uri)['type'] for uri in candidates}
+    results=[]; accepted={key:[] for key in FEEDS}; deep_budget=DeepBudget(MAX_DEEP)
     core=os.path.abspath(os.environ.get('SING_BOX','./bin/sing-box'))
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
         for result,line in pool.map(lambda u:probe(u,core,deadline,deep_budget),candidates):
             result['sources']=source_by_id[result['id']]
+            result['protocol']=protocol_by_id[result['id']]
             results.append(result)
             if line:
                 if result['qualified']: accepted['both'].append(line)
@@ -451,9 +632,10 @@ def main():
                     if result['service_qualified'][service]: accepted[service].append(line)
     if any(r.get('reason')=='core-start-failed' for r in results) and not any(r.get('core_started') for r in results):
         raise RuntimeError('core startup failed; do not publish')
-    report={'schema_version':2,'started_at':start,'completed_at':datetime.now(timezone.utc).isoformat(),
+    report={'schema_version':3,'started_at':start,'completed_at':datetime.now(timezone.utc).isoformat(),
             'vantage':'GitHub-hosted runner, not the user network','sources':sources,
-            'unsupported_or_rejected_lines':rejected,'unique_candidates':total,'sampled':len(candidates),
+            **stats,'sampled':len(candidates),
+            'coverage':coverage_summary(sources,len(normalized),results),
             'deep_tested':deep_budget.used,'qualified':len(accepted['both']),
             'feed_counts':{key:len(lines) for key,lines in accepted.items()},'results':results,
             'method':'2 quick HTTPS 204 checks; repeated verified HTTPS through same core at 15/30/45 seconds; two exact 2MiB downloads each >=256KiB/s; HTTP 200 and recognized YouTube/ChatGPT page content, no redirects/challenges; no playback/login/chat test',
@@ -468,6 +650,7 @@ def main():
     for key,filename in FEEDS.items():
         (output/filename).write_text('\n'.join(accepted[key])+ ('\n' if accepted[key] else ''))
     (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
-    print(json.dumps({'sampled':len(candidates),'deep_tested':deep_budget.used,'feed_counts':report['feed_counts']}))
+    print(json.dumps({'sampled':len(candidates),'deep_tested':deep_budget.used,
+                      'coverage':report['coverage'],'feed_counts':report['feed_counts']}))
 
 if __name__ == '__main__': main()
