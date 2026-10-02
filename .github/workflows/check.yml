@@ -1,0 +1,56 @@
+name: Check public subscription
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 */6 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: checked-subscription
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Offline tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Install checksum-pinned official core
+        run: python3 fetch_core.py
+      - name: Check current candidates
+        run: python3 checker.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: checked-output
+          path: public/
+          if-no-files-found: error
+          retention-days: 1
+  publish:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: checked-output
+          path: /tmp/checked-output
+      - name: Validate bounded output
+        run: python3 validate_output.py /tmp/checked-output
+      - name: Publish only generated files and license notices
+        run: |
+          cp LICENSE NOTICE.md /tmp/checked-output/
+          cp -r licenses /tmp/checked-output/
+          git switch --orphan checked
+          git rm -rf --ignore-unmatch .
+          cp -r /tmp/checked-output/. .
+          git add subscription.txt subscription-gpt.txt subscription-youtube.txt report.json LICENSE NOTICE.md licenses
+          git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m 'Publish current bounded check'
+          git push --force origin HEAD:checked

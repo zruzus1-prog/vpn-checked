@@ -1,0 +1,8 @@
+{
+  "version": "1.14.2",
+  "sha256": "a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6",
+  "source": "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.2",
+  "asset": "sing-box-1.14.2-linux-amd64.tar.gz",
+  "verified_at": "2026-10-02",
+  "verification": "Official GitHub immutable release asset digest; download rechecked before extraction"
+}
