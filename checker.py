@@ -3,6 +3,8 @@
 import base64
 import concurrent.futures
 import hashlib
+from html.parser import HTMLParser
+from collections import Counter
 import ipaddress
 import json
 import os
@@ -224,25 +226,96 @@ class DeepBudget:
             return True
 
 
-def service_label(name, status, body):
-    # Strict positive identification; false negatives are preferable to fake passes.
-    if status != 200: return 'http-' + str(status)
-    page = body.lower()
-    blocked = ('just a moment', 'attention required', 'before you continue',
-               'verify you are human', 'cf-chl-', 'unusual traffic',
-               'captcha', 'access denied', 'unsupported_country',
-               'service is not available in your country')
-    if any(marker in page for marker in blocked): return 'challenge-or-blocked'
-    if re.search(r'<form[^>]+action=["\'][^"\']*consent\.', page):
-        return 'consent-required'
-    if name == 'youtube':
-        valid = '<title>youtube</title>' in page and 'ytinitialdata' in page and 'ytcfg.set' in page
-    elif name == 'chatgpt':
-        valid = bool(re.search(r'<title[^>]*>\s*chatgpt(?:\s*[-|]|</title>)', page)) and any(
-            marker in page for marker in ('__next_data__', '__reactroutercontext', 'id="__next"'))
-    else:
-        raise ValueError('unknown service')
-    return 'page-confirmed' if valid else 'unrecognized-page'
+class PageSignals(HTMLParser):
+    """Inspect HTML text/structure without executing scripts or solving challenges."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.ignored=[]
+        self.title_depth=0
+        self.heading_depth=0
+        self.text=[]
+        self.title=[]
+        self.headings=[]
+        self.structure=set()
+
+    def handle_starttag(self,tag,attrs):
+        attrs=dict(attrs)
+        if tag in ('script','style','template'):
+            self.ignored.append(tag)
+            return
+        if self.ignored: return
+        if tag=='title': self.title_depth+=1
+        if tag in ('h1','h2'): self.heading_depth+=1
+        identity=' '.join((attrs.get('id') or '',attrs.get('class') or '')).lower()
+        if re.search(r'(?:^|\s)(?:cf-chl-|challenge-form|g-recaptcha|h-captcha)',identity):
+            self.structure.add('challenge-element')
+        if tag=='form':
+            action=U.urlsplit(attrs.get('action') or '')
+            destination=(action.hostname or '').lower()
+            if destination in ('consent.google.com','consent.youtube.com'):
+                self.structure.add('consent-form')
+            if action.path.startswith('/sorry/'):
+                self.structure.add('traffic-verification-form')
+        if tag=='iframe':
+            src=(attrs.get('src') or '').lower()
+            if '/recaptcha/' in src or 'hcaptcha.com/' in src or 'challenges.cloudflare.com/' in src:
+                self.structure.add('challenge-frame')
+
+    def handle_endtag(self,tag):
+        if self.ignored:
+            if tag==self.ignored[-1]: self.ignored.pop()
+            return
+        if tag=='title': self.title_depth=max(0,self.title_depth-1)
+        if tag in ('h1','h2'): self.heading_depth=max(0,self.heading_depth-1)
+
+    def handle_data(self,data):
+        if self.ignored: return
+        text=' '.join(data.lower().split())
+        if text:
+            self.text.append(text)
+            if self.title_depth: self.title.append(text)
+            if self.heading_depth: self.headings.append(text)
+
+
+def service_assessment(name,status,body):
+    """Status and bounded named evidence only; never retain HTML/cookies/tokens."""
+    signals=PageSignals()
+    try: signals.feed(body)
+    except (ValueError,RecursionError):
+        return {'label':'unrecognized-page','http_status':status,'blocking_signals':['malformed-html'],
+                'recognized_page':False,'interpretation':'automated-http-test-only'}
+    page=body.lower()
+    title=' '.join(signals.title)
+    if name=='youtube':
+        recognized=title=='youtube' and 'ytinitialdata' in page and 'ytcfg.set' in page
+    elif name=='chatgpt':
+        recognized=bool(re.fullmatch(r'chatgpt(?:\s*[-|].*)?',title)) and any(
+            marker in page for marker in ('__next_data__','__reactroutercontext','id="__next"'))
+    else: raise ValueError('unknown service')
+    found=set(signals.structure)
+    prominent=' '.join(signals.title+signals.headings)
+    visible=' '.join(signals.text)
+    # Generic words in JS/configuration (e.g. CAPTCHA feature names) are NOT a block.
+    prominent_markers=('just a moment','attention required','before you continue',
+                       'access denied','captcha','unsupported_country')
+    for marker in prominent_markers:
+        if marker in prominent: found.add('title-or-heading:'+marker.replace(' ','-'))
+    visible_markers=('verify you are human','checking your browser',
+                     'our systems have detected unusual traffic',
+                     'enable javascript and cookies to continue',
+                     'service is not available in your country')
+    for marker in visible_markers:
+        if marker in visible: found.add('page-text:'+marker.replace(' ','-'))
+    if status!=200: label='http-'+str(status)
+    elif found: label='challenge-or-blocked'
+    elif recognized: label='page-confirmed'
+    else: label='unrecognized-page'
+    return {'label':label,'http_status':status,'blocking_signals':sorted(found),
+            'recognized_page':recognized,'interpretation':'automated-http-test-only'}
+
+
+def service_label(name,status,body):
+    return service_assessment(name,status,body)['label']
 
 
 def probe(uri, core, deadline, deep_budget=None):
@@ -306,15 +379,19 @@ def probe(uri, core, deadline, deep_budget=None):
                           min_kib_s=round(min(speeds),1), download_kib_s=[round(x,1) for x in speeds],
                           stability_seconds=round(time.monotonic()-stable_start,1))
             phase='service-failed'
-            labels={}
+            labels={}; diagnostics={}
             for name,url in (('youtube','https://www.youtube.com/'),('chatgpt','https://chatgpt.com/')):
                 try:
                     code,_,_,body = request(url,timeout=8,limit=2*1024*1024,body=True)
-                    labels[name] = service_label(name,code,body)
-                except (Rejected,subprocess.TimeoutExpired): labels[name]='not-confirmed'
+                    diagnostics[name] = service_assessment(name,code,body)
+                    labels[name] = diagnostics[name]['label']
+                except (Rejected,subprocess.TimeoutExpired):
+                    labels[name]='not-confirmed'
+                    diagnostics[name]={'label':'not-confirmed','http_status':None,'blocking_signals':[],
+                                       'recognized_page':False,'interpretation':'automated-http-test-only'}
             if proc.poll() is not None: raise Rejected('core stopped')
             services={name:label=='page-confirmed' for name,label in labels.items()}
-            result.update(qualified=all(services.values()), service_qualified=services, reachability=labels)
+            result.update(qualified=all(services.values()), service_qualified=services, reachability=labels, service_diagnostics=diagnostics)
             if not any(services.values()):
                 result['reason']='services-not-confirmed'
                 return result,None
@@ -380,6 +457,10 @@ def main():
             'deep_tested':deep_budget.used,'qualified':len(accepted['both']),
             'feed_counts':{key:len(lines) for key,lines in accepted.items()},'results':results,
             'method':'2 quick HTTPS 204 checks; repeated verified HTTPS through same core at 15/30/45 seconds; two exact 2MiB downloads each >=256KiB/s; HTTP 200 and recognized YouTube/ChatGPT page content, no redirects/challenges; no playback/login/chat test',
+            'diagnostics':{'failure_reasons':dict(Counter(r.get('reason','primary-qualified' if r['qualified'] else 'service-only') for r in results)),
+                           'service_labels':{name:dict(Counter(r.get('reachability',{}).get(name,'not-tested') for r in results)) for name in ('youtube','chatgpt')},
+                           'blocking_signals':{name:dict(Counter(marker for r in results for marker in r.get('service_diagnostics',{}).get(name,{}).get('blocking_signals',[]))) for name in ('youtube','chatgpt')}},
+            'interpretation':'HTTP failures from this automated runner do not establish impossibility in a human browser; no playback/login/chat test',
             'limits':{'candidate_cap':MAX_CANDIDATES,'deep_cap':MAX_DEEP,'workers':WORKERS,
                       'budget_seconds':BUDGET,'stability_window_seconds':STABILITY_SECONDS,
                       'download_bytes_per_sample':DOWNLOAD_BYTES,'download_samples':2,

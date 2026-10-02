@@ -110,10 +110,39 @@ class StrengthenedTests(unittest.TestCase):
             for code in (204,301,302,403,429,500):
                 with self.subTest(name=name,code=code):
                     self.assertNotEqual(c.service_label(name,code,page),'page-confirmed')
-            for extra in ('Just a moment','Before you continue','cf-chl-foo','CAPTCHA','Verify you are human'):
+            for extra in ('<h1>Just a moment</h1>','<h1>Before you continue</h1>','<div id="cf-chl-foo"></div>','<h1>CAPTCHA</h1>','Verify you are human'):
                 with self.subTest(name=name,extra=extra):
                     self.assertNotEqual(c.service_label(name,200,page+extra),'page-confirmed')
             self.assertNotEqual(c.service_label(name,200,'<html>OK</html>'),'page-confirmed')
+
+    def test_script_configuration_is_not_visible_challenge(self):
+        # A real normal YouTube homepage inspected 2026-10-02 contained the word
+        # captcha in scripts, with no blocking marker in visible text. Synthetic
+        # fixture reproduces that mechanism without saving browser/account data.
+        configuration='<script>const flags={captcha:false}; const words="access denied; just a moment";</script>'
+        for name,page in [('youtube',YOUTUBE),('chatgpt',CHATGPT)]:
+            diagnostic=c.service_assessment(name,200,page+configuration)
+            self.assertEqual(diagnostic['label'],'page-confirmed')
+            self.assertEqual(diagnostic['blocking_signals'],[])
+            self.assertNotEqual(c.service_assessment(name,403,page+configuration)['label'],'page-confirmed')
+
+    def test_embedded_comment_or_style_is_not_challenge(self):
+        self.assertEqual(c.service_label('youtube',200,YOUTUBE+'<!-- captcha --><style>.captcha {}</style>'),'page-confirmed')
+
+    def test_structural_and_visible_challenges_still_fail(self):
+        for extra in ('<h1>Access denied</h1>', '<div>Verify you are human</div>',
+                      '<form action="https://consent.youtube.com/save"></form>',
+                      '<form action="/sorry/index"></form>',
+                      '<iframe src="https://www.google.com/recaptcha/api2/anchor"></iframe>'):
+            diagnostic=c.service_assessment('youtube',200,YOUTUBE+extra)
+            self.assertEqual(diagnostic['label'],'challenge-or-blocked')
+            self.assertTrue(diagnostic['blocking_signals'])
+
+    def test_http_403_is_not_called_bot_detection_without_evidence(self):
+        diagnostic=c.service_assessment('chatgpt',403,'Forbidden')
+        self.assertEqual(diagnostic['label'],'http-403')
+        self.assertEqual(diagnostic['blocking_signals'],[])
+        self.assertEqual(diagnostic['interpretation'],'automated-http-test-only')
 
     def artifact(self,path):
         result,line,*_=self.run_probe()
