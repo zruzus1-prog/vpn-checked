@@ -1,0 +1,38 @@
+[
+  {
+    "id": "igareck-black-ss",
+    "role": "control",
+    "url": "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt",
+    "file": "inputs/igareck-black-ss.txt"
+  },
+  {
+    "id": "igareck-black-mobile",
+    "role": "control",
+    "url": "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt",
+    "file": "inputs/igareck-black-mobile.txt"
+  },
+  {
+    "id": "apex-black",
+    "role": "control",
+    "url": "https://raw.githubusercontent.com/Diversan313/apex-parser/main/subs/main/alive_bl.txt",
+    "file": "inputs/apex-black.txt"
+  },
+  {
+    "id": "igareck-black-full",
+    "role": "candidate",
+    "url": "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
+    "file": "inputs/igareck-black-full.txt"
+  },
+  {
+    "id": "vovaplus-secure-vless",
+    "role": "candidate",
+    "url": "https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt",
+    "file": "inputs/vovaplus-secure-vless.txt"
+  },
+  {
+    "id": "eternity",
+    "role": "candidate",
+    "url": "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt",
+    "file": "inputs/eternity.txt"
+  }
+]
