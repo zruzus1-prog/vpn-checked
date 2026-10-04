@@ -13,7 +13,7 @@ class ReviewTests(unittest.TestCase):
     def probe_with(self, process, responses):
         with patch('checker.resolve_public', return_value='8.8.8.8'), \
              patch('checker.subprocess.Popen', return_value=process), \
-             patch('checker.time.sleep'), \
+             patch('checker.time.sleep'), patch('checker.MAX_ATTEMPTS',1), \
              patch('checker.curl', side_effect=responses):
             return c.probe(VLESS, '/fake/core', c.time.monotonic() + 180)
 
@@ -44,7 +44,7 @@ class ReviewTests(unittest.TestCase):
     def test_timeout_terminates_core(self):
         process = Mock()
         process.poll.return_value = None
-        result, line = self.probe_with(process, [subprocess.TimeoutExpired('curl', 5)])
+        result, line = self.probe_with(process, [subprocess.TimeoutExpired('curl', 5)]*2)
         self.assertFalse(result['qualified'])
         self.assertIsNone(line)
         process.terminate.assert_called_once()
@@ -54,7 +54,7 @@ class ReviewTests(unittest.TestCase):
         process = Mock()
         process.poll.return_value = None
         process.wait.side_effect = [subprocess.TimeoutExpired('core', 2), 0]
-        result, line = self.probe_with(process, [c.Rejected('failed')])
+        result, line = self.probe_with(process, [c.Rejected('failed')]*2)
         self.assertFalse(result['qualified'])
         process.kill.assert_called_once()
         self.assertEqual(process.wait.call_count, 2)

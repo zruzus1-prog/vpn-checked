@@ -12,7 +12,7 @@ def encode(s): return base64.urlsafe_b64encode(s.encode()).decode().rstrip('=')
 class ParserTests(unittest.TestCase):
     def test_vless_tls(self):
         p=c.parse_uri(VLESS)
-        self.assertEqual(p['tls'],{'enabled':True,'server_name':'example.org'})
+        self.assertEqual(p['tls'],{'enabled':True,'server_name':'example.org','utls':{'enabled':True,'fingerprint':'chrome'}})
         self.assertNotIn('insecure',p['tls'])
     def test_ss(self):
         p=c.parse_uri('ss://'+encode('aes-128-gcm:abc')+'@example.org:8388')
@@ -31,7 +31,7 @@ class ParserTests(unittest.TestCase):
         for q in ('allowInsecure=1','insecure=1','skip-cert-verify=true','plugin=x','security=tls'):
             with self.subTest(q=q), self.assertRaises(ValueError): c.parse_uri(VLESS+'&'+q)
     def test_rejects_cleartext_and_unsupported(self):
-        for uri in (f'vless://{UUID}@example.org:443', VLESS+'&type=grpc', VLESS+'&path=%0D%0Axx&type=ws', 'ss://'+encode('none:abc')+'@example.org:443','vmess://'+encode('[]')):
+        for uri in (f'vless://{UUID}@example.org:443', VLESS+'&type=xhttp', VLESS+'&path=%0D%0Axx&type=ws', 'ss://'+encode('none:abc')+'@example.org:443','vmess://'+encode('[]')):
             with self.subTest(uri=uri), self.assertRaises(ValueError): c.parse_uri(uri)
     def test_feed(self):
         self.assertEqual(c.feed_lines(encode(VLESS+'\n')), [VLESS])
@@ -77,7 +77,7 @@ class SecurityTests(unittest.TestCase):
 class ProbeTests(unittest.TestCase):
     def test_qualified_node_requires_all_baseline_checks(self):
         process=Mock(); process.poll.return_value=None
-        with patch('checker.resolve_public',return_value='8.8.8.8'), patch('checker.subprocess.Popen',return_value=process), patch('checker.time.sleep'), patch('checker.curl',side_effect=[(204,0,.1),(204,0,.2),(200,c.DOWNLOAD_BYTES,4)]+[(204,0,.2)]*3+[(200,c.DOWNLOAD_BYTES,4),(200,100,1,'<title>YouTube</title>ytInitialData ytcfg.set'),(403,100,1,'blocked')]):
+        with patch('checker.resolve_public',return_value='8.8.8.8'), patch('checker.subprocess.Popen',return_value=process), patch('checker.time.sleep'), patch('checker.MAX_ATTEMPTS',1), patch('checker.curl',side_effect=[(204,0,.1),(204,0,.2),(200,c.DOWNLOAD_BYTES,4)]+[(204,0,.2)]*3+[(200,c.DOWNLOAD_BYTES,4),(200,100,1,'<title>YouTube</title>ytInitialData ytcfg.set'),(403,100,1,'blocked')]):
             result,line=c.probe(VLESS,'/fake/core',c.time.monotonic()+180)
         self.assertFalse(result['qualified']); self.assertTrue(result['baseline_qualified']); self.assertIn('VLESS',line)
         self.assertEqual(result['reachability']['chatgpt'],'http-403')
@@ -85,13 +85,13 @@ class ProbeTests(unittest.TestCase):
         process.terminate.assert_called_once()
     def test_blocked_baseline_never_qualifies(self):
         process=Mock(); process.poll.return_value=None
-        with patch('checker.resolve_public',return_value='8.8.8.8'), patch('checker.subprocess.Popen',return_value=process), patch('checker.time.sleep'), patch('checker.curl',return_value=(403,0,.1)):
+        with patch('checker.resolve_public',return_value='8.8.8.8'), patch('checker.subprocess.Popen',return_value=process), patch('checker.time.sleep'), patch('checker.MAX_ATTEMPTS',1), patch('checker.curl',return_value=(403,0,.1)):
             result,line=c.probe(VLESS,'/fake/core',c.time.monotonic()+180)
         self.assertFalse(result['qualified']); self.assertIsNone(line)
         process.terminate.assert_called_once()
     def test_partial_download_never_qualifies(self):
         process=Mock(); process.poll.return_value=None
-        with patch('checker.resolve_public',return_value='8.8.8.8'), patch('checker.subprocess.Popen',return_value=process), patch('checker.time.sleep'), patch('checker.curl',side_effect=[(204,0,.1)]*2+[(200,65536,1)]):
+        with patch('checker.resolve_public',return_value='8.8.8.8'), patch('checker.subprocess.Popen',return_value=process), patch('checker.time.sleep'), patch('checker.MAX_ATTEMPTS',1), patch('checker.curl',side_effect=[(204,0,.1)]*2+[(200,65536,1)]):
             result,line=c.probe(VLESS,'/fake/core',c.time.monotonic()+180)
         self.assertFalse(result['qualified']); self.assertIsNone(line)
     def test_nonpublic_never_launches_core(self):

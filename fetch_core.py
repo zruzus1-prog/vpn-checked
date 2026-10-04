@@ -27,6 +27,9 @@ def install():
             data=tar.extractfile(member).read()
         Path('bin').mkdir(exist_ok=True)
         target=Path('bin/sing-box'); target.write_bytes(data); target.chmod(0o755)
+        (target.parent/'core-verification.json').write_text(json.dumps({
+            'version':version,'archive_sha256':digest,
+            'binary_sha256':hashlib.sha256(data).hexdigest()},sort_keys=True)+'\n')
     print('Official core archive verified; no proxy connections made by installer.')
 
 if __name__=='__main__': install()

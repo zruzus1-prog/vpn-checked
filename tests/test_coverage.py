@@ -71,13 +71,13 @@ class PluginTests(unittest.TestCase):
 
 class CoverageTests(unittest.TestCase):
     def collect(self,feeds):
-        with patch('checker.download_feed',side_effect=feeds):
+        with patch('checker.download_feed',side_effect=feeds+['']*(len(c.SOURCES)-len(feeds))):
             return c.collect_candidates()
 
     def test_source_counts_dedup_endpoints_and_no_secret_diagnostics(self):
         first=vless()+'#name-one'
         duplicate=vless()+'#name-two'
-        alternate=vless(extra='&fp=chrome')
+        alternate=vless(extra='&fp=firefox')
         unsafe=vless(2)+'&insecure=1'
         unsupported=vless(3)+'&unknownOption=none'
         malformed='vless://SECRET_INVALID_UUID@example.org:443?security=tls'
@@ -99,8 +99,7 @@ class CoverageTests(unittest.TestCase):
     def test_disabled_insecure_flags_are_not_reported_as_enabled(self):
         for flag in ('insecure=0','allowInsecure=false'):
             uri=vless()+'&'+flag
-            with self.assertRaises(ValueError) as caught: c.parse_uri(uri)
-            self.assertEqual(c.rejection_category(uri,caught.exception),'unsupported-option')
+            self.assertEqual(c.parse_uri(uri),c.parse_uri(vless()))
 
     def test_selection_is_deterministic_and_does_not_randomly_omit_under_cap(self):
         normalized={json.dumps(c.parse_uri(vless(i)),sort_keys=True,separators=(',',':')):vless(i)
@@ -119,13 +118,14 @@ class CoverageTests(unittest.TestCase):
             calls.append(uri)
             deep=reason not in ('budget','deep-budget','quick-https-failed')
             if deep: self.assertTrue(budget.claim())
-            return {'id':hashlib.sha256(uri.encode()).hexdigest()[:16],
+            return {'id':c.node_id(uri),'identity_version':c.CANONICALIZATION_VERSION,
+                    'checked_at':c.utc_now(),'completed_at':c.utc_now(),'attempts':[],
                     'qualified':False,'baseline_qualified':False,'deep_tested':deep,
                     'service_qualified':{'youtube':False,'chatgpt':False},'reason':reason},None
         cwd=os.getcwd()
         try:
             os.chdir(root)
-            feeds=[feed,feed,c.Rejected('unavailable') if source_failure else feed]
+            feeds=[feed,feed,c.Rejected('unavailable') if source_failure else feed]+['']*(len(c.SOURCES)-3)
             with patch('checker.download_feed',side_effect=feeds),patch('checker.probe',side_effect=fake_probe):
                 c.main()
             validate(Path(root)/'public')
@@ -141,28 +141,24 @@ class CoverageTests(unittest.TestCase):
         self.assertTrue(report['coverage']['complete_supported'])
         self.assertEqual(report['coverage']['completed_assessments'],172)
 
-    def test_above_cap_is_explicitly_incomplete(self):
-        with tempfile.TemporaryDirectory() as td:
-            report,calls=self.main_artifact(td,c.MAX_CANDIDATES+1)
-        self.assertEqual(len(calls),c.MAX_CANDIDATES)
-        self.assertEqual(report['coverage']['candidate_cap_skipped'],1)
-        self.assertFalse(report['coverage']['complete_supported'])
+    def test_above_cap_fails_without_silent_sampling(self):
+        with tempfile.TemporaryDirectory() as td, self.assertRaises(RuntimeError):
+            self.main_artifact(td,c.MAX_CANDIDATES+1)
 
-    def test_deadline_deep_cap_and_missing_source_are_incomplete(self):
+    def test_deadline_deep_cap_and_missing_source_prevent_publication(self):
         for reason,missing in [('budget',False),('deep-budget',False),('quick-https-failed',True)]:
-            with self.subTest(reason=reason),tempfile.TemporaryDirectory() as td:
-                report,_=self.main_artifact(td,2,reason,missing)
-                self.assertFalse(report['coverage']['complete_supported'])
+            with self.subTest(reason=reason),tempfile.TemporaryDirectory() as td,self.assertRaises(RuntimeError):
+                self.main_artifact(td,2,reason,missing)
 
-    def test_publisher_rejects_false_complete_and_tampered_counts(self):
+    def test_publisher_rejects_tampered_complete_and_counts(self):
         with tempfile.TemporaryDirectory() as td:
-            report,_=self.main_artifact(td,c.MAX_CANDIDATES+1)
-            mutations=[lambda r:r['coverage'].update(complete_supported=True),
-                       lambda r:r['coverage'].update(candidate_cap_skipped=0),
+            report,_=self.main_artifact(td,2)
+            mutations=[lambda r:r['coverage'].update(complete_supported=False),
+                       lambda r:r['coverage'].update(candidate_cap_skipped=1),
                        lambda r:r['coverage'].update(deadline_skipped=False),
                        lambda r:r['sources'][0].update(supported_lines=1),
                        lambda r:r['sources'][0]['rejection_categories'].update(SECRET=1),
-                       lambda r:r.update(unique_candidates=c.MAX_CANDIDATES)]
+                       lambda r:r.update(unique_candidates=1)]
             path=Path(td)/'public'
             for mutate in mutations:
                 case=copy.deepcopy(report);mutate(case)
@@ -209,7 +205,7 @@ class CompatibilityTests(unittest.TestCase):
                 c.parse_uri('trojan://synthetic@example.org:443?'+option)
 
     def test_capacity_and_probe_gates_remain_bounded(self):
-        self.assertEqual((c.MAX_CANDIDATES,c.MAX_DEEP,c.WORKERS,c.BUDGET),(512,512,4,5400))
+        self.assertEqual((c.MAX_CANDIDATES,c.MAX_DEEP,c.WORKERS,c.BUDGET),(2048,2048,4,5400))
         self.assertEqual((c.STABILITY_SECONDS,c.DOWNLOAD_BYTES,c.MIN_BYTES_PER_SECOND),(45,2*1024*1024,256*1024))
 
 

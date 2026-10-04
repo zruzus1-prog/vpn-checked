@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 import checker as c
@@ -33,11 +33,13 @@ def success_responses(yt=YOUTUBE,gpt=CHATGPT):
 class StrengthenedTests(unittest.TestCase):
     def run_probe(self,responses=None,budget=None):
         process=Mock(); process.poll.return_value=None
-        clock=Clock()
-        with patch('checker.resolve_public',return_value='8.8.8.8'), \
+        clock=Clock();utc_base=datetime.now(timezone.utc)-timedelta(minutes=5)
+        with patch('checker.utc_now',side_effect=lambda:(utc_base+timedelta(seconds=clock.now-100)).isoformat()), \
+             patch('checker.resolve_public',return_value='8.8.8.8'), \
              patch('checker.subprocess.Popen',return_value=process) as launch, \
              patch('checker.time.monotonic',side_effect=clock.monotonic), \
              patch('checker.time.sleep',side_effect=clock.sleep), \
+             patch('checker.MAX_ATTEMPTS',1), \
              patch('checker.curl',side_effect=responses or success_responses()) as request:
             result,line=c.probe(URI,'/fake/core',300,budget)
         return result,line,process,launch,request
@@ -149,12 +151,7 @@ class StrengthenedTests(unittest.TestCase):
         for filename in c.FEEDS.values(): (path/filename).write_text(line+'\n')
         with patch('checker.download_feed',return_value=URI):
             _,_,sources,stats=c.collect_candidates()
-        report={'schema_version':3,**stats,'sources':sources,
-                'coverage':c.coverage_summary(sources,1,[result]),
-                'completed_at':datetime.now(timezone.utc).isoformat(),
-                'sampled':1,'deep_tested':1,'qualified':1,
-                'feed_counts':{key:1 for key in c.FEEDS},'results':[result]}
-        (path/'report.json').write_text(json.dumps(report))
+        report=c.write_report(path,sources,stats,[result],{key:[line] for key in c.FEEDS},c.utc_now())
         return report
 
     def test_fresh_three_feed_artifact_valid(self):

@@ -1,6 +1,12 @@
 name: Check public subscription
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish this fully validated snapshot to the checked branch
+        type: boolean
+        required: false
+        default: false
   schedule:
     - cron: '23 */6 * * *'
 permissions:
@@ -9,48 +15,157 @@ concurrency:
   group: checked-subscription
   cancel-in-progress: false
 jobs:
-  check:
+  prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 95
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.freeze.outputs.matrix }}
+      manifest_sha256: ${{ steps.freeze.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Offline tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Freeze every supported candidate from all sources once
+        id: freeze
+        run: python3 production.py prepare --manifest /tmp/frozen/manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: frozen-manifest
+          path: /tmp/frozen/
+          if-no-files-found: error
+          retention-days: 1
+  shard:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: frozen-manifest
+          path: /tmp/frozen
+      - name: Verify exact prepare-stage manifest digest
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare.outputs.manifest_sha256 }}
+        run: |
+          test "$(cat /tmp/frozen/manifest.sha256)" = "$EXPECTED_MANIFEST_SHA256"
+          echo "$EXPECTED_MANIFEST_SHA256  /tmp/frozen/manifest.json" | sha256sum --check --status
+      - name: Install checksum-pinned official core
+        run: python3 fetch_core.py
+      - name: Synthetic new-parser conformance against the pinned binary
+        run: SING_BOX_TEST_BIN="$PWD/bin/sing-box" python3 -m unittest discover -s tests -p test_parser_compat.py -v
+      - name: Preflight core schema and check every frozen shard candidate
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+        run: python3 production.py shard --manifest /tmp/frozen/manifest.json --shard "$SHARD_ID" --output /tmp/shard-results
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: probe-shard-${{ matrix.shard }}
+          path: /tmp/shard-results/
+          if-no-files-found: error
+          retention-days: 1
+  merge:
+    needs: [prepare, shard]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Offline tests
-        run: python3 -m unittest discover -s tests -v
-      - name: Install checksum-pinned official core
-        run: python3 fetch_core.py
-      - name: Check current candidates
-        run: python3 checker.py
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: frozen-manifest
+          path: /tmp/frozen
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: probe-shard-*
+          path: /tmp/shard-results
+          merge-multiple: true
+      - name: Verify exact prepare-stage manifest digest
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare.outputs.manifest_sha256 }}
+        run: |
+          test "$(cat /tmp/frozen/manifest.sha256)" = "$EXPECTED_MANIFEST_SHA256"
+          echo "$EXPECTED_MANIFEST_SHA256  /tmp/frozen/manifest.json" | sha256sum --check --status
+      - name: Require complete fresh coverage and assemble current feeds only
+        run: python3 production.py merge --manifest /tmp/frozen/manifest.json --shards /tmp/shard-results --output /tmp/checked-output
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: checked-output
-          path: public/
+          path: /tmp/checked-output/
           if-no-files-found: error
           retention-days: 1
   publish:
-    needs: check
+    needs: [prepare, merge]
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish == true))
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: frozen-manifest
+          path: /tmp/frozen
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: checked-output
           path: /tmp/checked-output
-      - name: Validate bounded output
-        run: python3 validate_output.py /tmp/checked-output
-      - name: Publish only generated files and license notices
+      - name: Validate bounded output and exact source snapshot again
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare.outputs.manifest_sha256 }}
         run: |
+          test "$(cat /tmp/frozen/manifest.sha256)" = "$EXPECTED_MANIFEST_SHA256"
+          echo "$EXPECTED_MANIFEST_SHA256  /tmp/frozen/manifest.json" | sha256sum --check --status
+          python3 production.py verify-public --manifest /tmp/frozen/manifest.json --output /tmp/checked-output
+      - name: Preserve checked history and publish with a concurrent-update lease
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote --heads origin refs/heads/main | cut -f1)" = "$GITHUB_SHA"
           cp LICENSE NOTICE.md /tmp/checked-output/
           cp -r licenses /tmp/checked-output/
-          git switch --orphan checked
-          git rm -rf --ignore-unmatch .
+          expected="$(git ls-remote --heads origin refs/heads/checked | cut -f1)"
+          if [ -n "$expected" ]; then
+            git fetch --no-tags origin refs/heads/checked
+            test "$(git rev-parse FETCH_HEAD)" = "$expected"
+            git switch --detach "$expected"
+          else
+            git switch --orphan checked
+          fi
+          git rm -r --ignore-unmatch .
           cp -r /tmp/checked-output/. .
-          git add subscription.txt subscription-gpt.txt subscription-youtube.txt report.json LICENSE NOTICE.md licenses
-          git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m 'Publish current bounded check'
-          git push --force origin HEAD:checked
+          git add -- subscription.txt subscription-gpt.txt subscription-youtube.txt report.json LICENSE NOTICE.md licenses
+          if git diff --cached --quiet; then
+            echo 'Snapshot unchanged; nothing to publish.'
+            exit 0
+          fi
+          git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m 'Publish complete frozen-snapshot check'
+          if [ -n "$expected" ]; then
+            git merge-base --is-ancestor "$expected" HEAD
+          fi
+          test "$(git ls-remote --heads origin refs/heads/main | cut -f1)" = "$GITHUB_SHA"
+          git push --force-with-lease="refs/heads/checked:$expected" origin HEAD:refs/heads/checked

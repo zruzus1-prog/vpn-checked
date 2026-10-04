@@ -18,7 +18,7 @@ into this checker.
 - License: GNU GPL version 3; upstream license file:
   <https://github.com/igareck/vpn-configs-for-russia/blob/main/LICENSE>
 - Subscription inputs: `BLACK_SS+All_RUS.txt` and
-  `BLACK_VLESS_RUS_mobile.txt` in that repository.
+  `BLACK_VLESS_RUS_mobile.txt` and `BLACK_VLESS_RUS.txt` in that repository.
 - A verbatim copy of its GPLv3 license text is included as [LICENSE](LICENSE).
 
 The upstream license file reviewed on 2026-10-02 contains the standard GPLv3
@@ -45,17 +45,40 @@ disclaimer, is preserved verbatim in [licenses/apex-MIT.txt](licenses/apex-MIT.t
 The public repository's MIT notice does not grant access to or rights in its
 separate private repositories.
 
+## VovaplusEXP/p-configs
+
+- Upstream: <https://github.com/VovaplusEXP/p-configs>
+- Input: `Splitted-By-Protocol-Secure/vless.txt` on `main`
+- License: GNU GPL version 3; exact upstream file reviewed 2026-10-04:
+  <https://github.com/VovaplusEXP/p-configs/blob/main/LICENSE>
+- Verbatim license preserved in [licenses/vovaplus-GPL-3.0.txt](licenses/vovaplus-GPL-3.0.txt)
+
+## mahdibland/V2RayAggregator
+
+- Upstream: <https://github.com/mahdibland/V2RayAggregator>
+- Input: `Eternity.txt` on `master`
+- License: GNU GPL version 3; exact upstream file reviewed 2026-10-04:
+  <https://github.com/mahdibland/V2RayAggregator/blob/master/LICENSE>
+- Verbatim license preserved in [licenses/eternity-GPL-3.0.txt](licenses/eternity-GPL-3.0.txt)
+
+Both upstream license files have Git blob SHA
+`f288702d2fa16d3cdf0035b15a9fcbc552cd88e7` and contain the standard GPLv3
+text. No project-specific author/year notice is invented. The license-document
+copyright notice remains intact. No checker code is copied from either source.
+Publicly aggregated endpoints are untrusted candidate data, not endorsements or
+a grant of rights to third-party network infrastructure.
+
 ## Generated subscriptions and changes
 
 The output is a modified selection and combination of the identified public
 subscription inputs, not an unmodified upstream release. This checker decodes,
 parses, rejects unsupported or unsafe entries, deduplicates, tests candidates,
 and selects successful configurations. Outputs may be serialized or encoded for
-subscription clients. These transformation rules were prepared on 2026-10-02;
+subscription clients. These transformation rules were prepared on 2026-10-02 and extended with conservative compatibility, bounded retry diagnostics and full snapshot sharding on 2026-10-04;
 each run records its actual generation time in the accompanying report.
 
 Distribute generated subscriptions together with this notice, the GPLv3 license
-and the apex MIT notice. Preserve the GPLv3 terms for covered igareck material
+and all included upstream license notices. Preserve the GPLv3 terms for covered igareck material
 and the MIT notice for covered apex material. This project's GPL designation
 does not remove MIT rights in the upstream MIT portions. Public availability and
 these repository licenses do not establish that every third-party endpoint is
