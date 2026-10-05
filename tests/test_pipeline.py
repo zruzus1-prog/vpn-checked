@@ -147,9 +147,9 @@ class PipelineTests(unittest.TestCase):
                          {'include': [{'shard': shard['id']} for shard in manifest['shards']]})
         self.assertEqual(values['manifest_sha256'], p.digest(self.manifest_path.read_bytes()))
 
-    def test_six_source_inventory_is_required(self):
-        self.assertEqual(len(c.SOURCES), 6)
-        with patch('checker.download_feed', side_effect=[feed(uri())] * 5 + [c.Rejected('offline')]):
+    def test_seven_source_inventory_is_required(self):
+        self.assertEqual(len(c.SOURCES), 7)
+        with patch('checker.download_feed', side_effect=[feed(uri())] * (len(c.SOURCES)-1) + [c.Rejected('offline')]):
             with self.assertRaises(ValueError):
                 p.prepare(self.manifest_path)
         self.assertFalse(self.manifest_path.exists())

@@ -25,7 +25,7 @@ import validate_output as v
 SOURCE = 'https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/secure/configs.txt'
 CAP = 512
 SNAPSHOTS = 4
-PRODUCTION_SOURCES = tuple(c.SOURCES)
+PRODUCTION_SOURCES = tuple(url for url in c.SOURCES if url != SOURCE)
 PRODUCTION_CAP = c.MAX_CANDIDATES
 MAX_CONTEXT_BYTES = 8 * 1024 * 1024
 CONTEXT_KEYS = {'schema_version', 'trial_source', 'trial_cap', 'identity_version',
@@ -72,7 +72,7 @@ def checked_ids(values, maximum):
     return set(values)
 
 
-def collect_current():
+def _collect_current():
     """Current six-source parser snapshot, not current network qualification."""
     p.require(tuple(c.SOURCES) == PRODUCTION_SOURCES and len(c.SOURCES) == 6,
               'review changed production source baseline before running trial')
@@ -86,6 +86,17 @@ def collect_current():
     return {'captured_at': p.now_iso(), 'sources': sources, 'stats': stats,
             'candidate_ids': [row['id'] for row in candidates],
             'scope': 'current-parser-supported-candidates-not-network-qualification'}
+
+
+def collect_current():
+    """Keep the trial comparison against the six other production sources."""
+    previous = c.SOURCES, v.SOURCES
+    try:
+        c.SOURCES = list(PRODUCTION_SOURCES)
+        v.SOURCES = c.SOURCES
+        return _collect_current()
+    finally:
+        c.SOURCES, v.SOURCES = previous
 
 
 def git_output(arguments, limit):

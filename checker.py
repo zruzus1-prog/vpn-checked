@@ -29,6 +29,7 @@ SOURCES = [
  'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt',
  'https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt',
  'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt',
+ 'https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/secure/configs.txt',
 ]
 MAX_CANDIDATES = 2048
 WORKERS = 4

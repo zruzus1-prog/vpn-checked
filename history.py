@@ -5,6 +5,7 @@ Upstream feeds cannot supply this state. A historic success can only nominate a
 candidate for retest, never qualify an export. No configuration data is logged.
 """
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -20,6 +21,9 @@ import checker as c
 SCHEMA = 1
 MEASUREMENT_PROFILE = 'sing-box-1.14.2-v2/https204-stability45-2x2MiB-256KiBs-youtube-html-v1'
 BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19'}
+# Captured allowlists, not a source list supplied by a historical report.
+CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
+LEGACY_SOURCE_INVENTORY = CURRENT_SOURCE_INVENTORY[:-1]
 MAX_AGE_SECONDS = 48 * 3600
 MAX_BYTES = 12 * 1024 * 1024
 MAX_RUNS = 32
@@ -334,6 +338,23 @@ def authenticate_publication(repo, commit, report, token, *, now):
     return run['event']
 
 
+@contextmanager
+def archived_source_inventory(report):
+    """Read-compatible exact six/seven inventories; no current-source relaxation."""
+    import validate_output as output_validator
+    sources = report.get('sources')
+    need(isinstance(sources, list) and all(isinstance(source, dict) for source in sources))
+    inventory = tuple(source.get('url') for source in sources)
+    need(inventory in (LEGACY_SOURCE_INVENTORY, CURRENT_SOURCE_INVENTORY))
+    previous = c.SOURCES, output_validator.SOURCES
+    try:
+        c.SOURCES = list(inventory)
+        output_validator.SOURCES = c.SOURCES
+        yield
+    finally:
+        c.SOURCES, output_validator.SOURCES = previous
+
+
 def load_remote(repo, token, *, now=None):
     """Rebuild history from bounded authenticated publications, never aggregates.
 
@@ -393,7 +414,8 @@ def load_remote(repo, token, *, now=None):
                 (root/'history.json').write_bytes(data)
                 if not snapshots:
                     latest_claim = prune(state, now)
-            validate_output(root, as_of=stamp(report['completed_at']))
+            with archived_source_inventory(report):
+                validate_output(root, as_of=stamp(report['completed_at']))
             exports = {c.node_id(uri): uri for uri in (root/c.FEEDS['youtube']).read_text().splitlines()}
             # Retain only compact replay facts, not 32 full attempt-heavy reports.
             rows = [{'id': row['id'], 'sources': row['sources'], 'original_uri_sha256': row['original_uri_sha256'], 'youtube': row['service_qualified']['youtube'],
