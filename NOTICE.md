@@ -68,6 +68,19 @@ copyright notice remains intact. No checker code is copied from either source.
 Publicly aggregated endpoints are untrusted candidate data, not endorsements or
 a grant of rights to third-party network infrastructure.
 
+## 0xRadikal/Free-v2ray-Configs
+
+- Upstream: <https://github.com/0xRadikal/Free-v2ray-Configs>
+- Input: `secure/configs.txt` on `main`
+- License: MIT; exact upstream license retrieved 2026-10-05 from Git blob
+  `4c64c1d3f3addc7f673d52fc748729bc883c36df`
+- Exact upstream copyright notice: `Copyright (c) 2026 0xRadikal`
+- Complete license preserved verbatim in [licenses/radikal-MIT.txt](licenses/radikal-MIT.txt)
+
+This input was incorporated only after an isolated full fresh trial. Its name
+`secure` does not bypass this checker's parser, TLS, address-safety, baseline or
+service checks. Trial success does not create production stability history.
+
 ## Generated subscriptions and changes
 
 The output is a modified selection and combination of the identified public
@@ -79,7 +92,7 @@ each run records its actual generation time in the accompanying report.
 
 Distribute generated subscriptions together with this notice, the GPLv3 license
 and all included upstream license notices. Preserve the GPLv3 terms for covered igareck material
-and the MIT notice for covered apex material. This project's GPL designation
+and the MIT notices for covered apex and Radikal material. This project's GPL designation
 does not remove MIT rights in the upstream MIT portions. Public availability and
 these repository licenses do not establish that every third-party endpoint is
 authorized, trustworthy or lawful to use in every jurisdiction. No rights to
