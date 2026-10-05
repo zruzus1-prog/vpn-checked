@@ -17,10 +17,13 @@ import urllib.request
 import urllib.error
 
 import checker as c
+import diversity as d
 
 SCHEMA = 1
 MEASUREMENT_PROFILE = 'sing-box-1.14.2-v2/https204-stability45-2x2MiB-256KiBs-youtube-html-v1'
-BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19'}
+BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
+                             '976c84b3a09bb8a7decc1c623726f28749720986'}
+LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Captured allowlists, not a source list supplied by a historical report.
 CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
 LEGACY_SOURCE_INVENTORY = CURRENT_SOURCE_INVENTORY[:-1]
@@ -40,13 +43,22 @@ STATE_KEYS = {'schema_version', 'measurement_profile', 'identity_version', 'crea
 RUN_KEYS = {'run_id', 'run_attempt', 'snapshot_at', 'implementation_sha', 'event'}
 ENTRY_KEYS = {'id', 'uri', 'sources', 'last_upstream_seen_at', 'observations'}
 OBS_KEYS = {'run_id', 'youtube', 'min_kib_s', 'median_ms', 'tested_address'}
-POLICY = {'retention_seconds': MAX_AGE_SECONDS, 'metadata_entry_cap': MAX_ENTRIES, 'main_cap': STABLE_CAP,
+LEGACY_POLICY = {'retention_seconds': MAX_AGE_SECONDS, 'metadata_entry_cap': MAX_ENTRIES, 'main_cap': STABLE_CAP,
           'minimum_distinct_passes': MIN_PASSES, 'minimum_span_seconds': MIN_SPAN_SECONDS,
           'minimum_run_gap_seconds': MIN_RUN_GAP_SECONDS, 'minimum_observed_pass_rate': MIN_RATE,
           'minimum_all_pass_speed_kib_s': MIN_STABLE_KIB_S, 'last_observed_passes_required': 2,
           'diversity': 'one-per-current-tested-address-after-qualification',
           'ranking': 'pass-rate,pass-count,worst-pass-speed,median-latency,semantic-id',
           'scope': 'YouTube-homepage-and-baseline-from-GitHub; not Russia or media-playback proof'}
+
+
+POLICY = {**LEGACY_POLICY,
+          'selection_policy': d.POLICY,
+          'minimum_all_pass_speed_kib_s': MIN_STABLE_KIB_S,
+          'minimum_speed_scope': 'strict-history tier only; other tiers retain fresh 256 KiB/s baseline',
+          'diversity': 'hard endpoint-prefix,protocol,connection-group,and all-source-owner caps',
+          'ranking': d.POLICY['ranking'],
+          'history_scope': 'strict-history and repeated-baseline tiers; at most 10 explicitly classified diversity slots'}
 
 
 def need(condition):
@@ -203,7 +215,7 @@ def update(state, current, results, *, at, implementation_sha, run_id, run_attem
     return output
 
 
-def split(state, results, exports):
+def legacy_split(state, results, exports):
     """Qualify before diversity/ranking, with all overflow retained in reserve."""
     runs = {r['run_id']: r for r in state['runs']}
     current = {r['id']: r for r in results if r['service_qualified']['youtube']}
@@ -249,8 +261,65 @@ def split(state, results, exports):
             chosen.append(rid); addresses.add(address)
     reserve = sorted(set(current)-set(chosen))
     return {'stable': [exports[rid] for rid in chosen], 'reserve': [exports[rid] for rid in reserve]}, {
-        'policy': POLICY, 'eligible_before_diversity': len(qualified),
+        'policy': LEGACY_POLICY, 'eligible_before_diversity': len(qualified),
         'stable_ids': chosen, 'reserve_ids': reserve, 'evidence': evidence}
+
+
+def split(state, results, exports):
+    """Fresh qualification is mandatory; history chooses tiers, never freshness.
+
+    The strict tier retains every original history/speed requirement. At most
+    ten other fresh-baseline candidates can contribute missing variations.
+    No connection URI or fragment is edited by this partition.
+    """
+    _, legacy = legacy_split(state, results, exports)
+    evidence = legacy['evidence']
+    current = {row['id']: row for row in results if row['service_qualified']['youtube']}
+    need(set(current) == set(exports) and set(evidence) == set(current))
+    entries = {entry['id']: entry for entry in state['entries']}
+    candidates = []
+    runs = {run['run_id']: run for run in state['runs']}
+    for rid, row in sorted(current.items()):
+        need(row['min_kib_s'] >= c.MIN_BYTES_PER_SECOND/1024 and
+             measured_min_speed(row) >= c.MIN_BYTES_PER_SECOND/1024)
+        entry = entries[rid]
+        ev = evidence[rid]
+        observed = [obs for obs in entry['observations'] if runs[obs['run_id']]['event'] != 'local']
+        repeated = (ev['spaced_passes'] >= MIN_PASSES and ev['span_seconds'] >= MIN_SPAN_SECONDS and
+                    ev['pass_rate'] >= MIN_RATE and len(observed) >= 2 and
+                    all(obs['youtube'] for obs in observed[-2:]))
+        tier = 'strict-history' if ev['eligible'] else 'repeated-baseline' if repeated else 'fresh-diversity'
+        outbound = c.parse_uri(exports[rid])
+        need(c.node_id(exports[rid]) == rid)
+        protocol = 'ss' if outbound['type'] == 'shadowsocks' else outbound['type']
+        candidate = {'id': rid, 'prefix': d.endpoint_prefix(row['tested_address']),
+                     'protocol': protocol, 'group': d.connection_group(outbound),
+                     'owners': d.source_owners(entry['sources']), 'tier': tier}
+        candidates.append(candidate)
+        ev.update({'tier': tier, 'repeated_cloud_evidence': bool(repeated),
+                   'endpoint_prefix': candidate['prefix'], 'connection_group': candidate['group'],
+                   'source_owners': list(candidate['owners'])})
+    chosen, summary, decisions = d.select(candidates)
+    for rid, decision in decisions.items():
+        evidence[rid].update(decision)
+    reserve = sorted(set(current)-set(chosen))
+    return {'stable': [exports[rid] for rid in chosen], 'reserve': [exports[rid] for rid in reserve]}, {
+        'policy': POLICY, 'eligible_before_diversity': len(candidates), 'selection': summary,
+        'stable_ids': chosen, 'reserve_ids': reserve, 'evidence': evidence}
+
+
+def split_for_report(state, results, exports, report, *, allow_legacy=False):
+    """Only archived reports from explicit old commits may use the old selector.
+
+    Current publication validation never opts into this read-only compatibility
+    path. Authentication of the old commit/run is separately required by replay.
+    """
+    legacy = report['history'].get('policy') == LEGACY_POLICY
+    if legacy:
+        need(allow_legacy and report['production']['implementation_sha'] in LEGACY_SPLIT_IMPLEMENTATIONS)
+        return legacy_split(state, results, exports)
+    need(report['history'].get('policy') == POLICY)
+    return split(state, results, exports)
 
 
 def strict_json(data):
@@ -415,7 +484,7 @@ def load_remote(repo, token, *, now=None):
                 if not snapshots:
                     latest_claim = prune(state, now)
             with archived_source_inventory(report):
-                validate_output(root, as_of=stamp(report['completed_at']))
+                validate_output(root, as_of=stamp(report['completed_at']), allow_legacy_split=True)
             exports = {c.node_id(uri): uri for uri in (root/c.FEEDS['youtube']).read_text().splitlines()}
             # Retain only compact replay facts, not 32 full attempt-heavy reports.
             rows = [{'id': row['id'], 'sources': row['sources'], 'original_uri_sha256': row['original_uri_sha256'], 'youtube': row['service_qualified']['youtube'],

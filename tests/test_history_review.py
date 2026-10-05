@@ -107,13 +107,13 @@ class HistoryBoundaryReviewTests(unittest.TestCase):
             hours=(12, 11.999, 6, 5.999, 0),
             passed=[True, False, True, False, True])
         feeds, proof = h.split(state, rows, exports)
-        self.assertEqual(feeds['stable'], [])
+        self.assertFalse(proof['evidence'][rows[0]['id']]['eligible'])
         self.assertEqual(proof['evidence'][rows[0]['id']]['pass_rate'], .6)
 
     def test_overspeed_historical_pass_cannot_hide_slow_current_pass(self):
         state, rows, exports = histories.history_for()
         rows[0]['min_kib_s'] = 511.9
-        self.assertEqual(h.split(state, rows, exports)[0]['stable'], [])
+        self.assertFalse(h.split(state, rows, exports)[1]['evidence'][rows[0]['id']]['eligible'])
 
 
 class HistoryReplayReviewTests(unittest.TestCase):

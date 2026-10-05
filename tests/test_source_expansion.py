@@ -37,14 +37,17 @@ class SourceExpansionTests(unittest.TestCase):
                 with h.archived_source_inventory({'sources':[{'url':url} for url in inventory]}):
                     self.fail('untrusted source inventory admitted')
 
-    def test_new_identity_only_enters_reserve_after_one_fresh_pass(self):
+    def test_new_identity_is_explicit_diversity_trial_after_one_fresh_pass(self):
         item=fixtures.candidate(900);item['sources']=[RADIKAL]
         state=h.empty(fixtures.NOW.isoformat())
         result=fixtures.row(item)
         state=h.update(state,[item],[result],at=fixtures.NOW.isoformat(),implementation_sha='1'*40,
                        run_id='1234',run_attempt='1',event='schedule')
-        split,_=h.split(state,[result],{item['id']:item['uri']})
-        self.assertEqual(split,{'stable':[],'reserve':[item['uri']]})
+        split,proof=h.split(state,[result],{item['id']:item['uri']})
+        self.assertEqual(split,{'stable':[item['uri']],'reserve':[]})
+        self.assertFalse(proof['evidence'][item['id']]['eligible'])
+        self.assertEqual(proof['evidence'][item['id']]['tier'],'fresh-diversity')
+        self.assertEqual(proof['selection']['selected_tier_counts']['fresh-diversity'],1)
 
     def test_experimental_run_cannot_authenticate_production_history(self):
         report,commit,run,jobs=fixtures.AuthenticationTests().fixtures()

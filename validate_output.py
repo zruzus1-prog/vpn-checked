@@ -242,7 +242,7 @@ def validate_coverage(report, results):
         if type(actual[key]) is not type(value): raise ValueError('invalid coverage types')
 
 
-def validate(root, *, as_of=None):
+def validate(root, *, as_of=None, allow_legacy_split=False):
     root=Path(root)
     now=as_of or datetime.now(timezone.utc)
     from history import strict_json
@@ -339,15 +339,18 @@ def validate(root, *, as_of=None):
         raise ValueError('inconsistent primary count')
     validate_coverage(report,results)
     if 'history' in report:
-        validate_history_outputs(root,report,results,now)
+        validate_history_outputs(root,report,results,now,allow_legacy_split=allow_legacy_split)
 
 
-def validate_history_outputs(root, report, results, now):
+def validate_history_outputs(root, report, results, now, *, allow_legacy_split=False):
     import history as h
     metadata=report['history']
     allowed={'state_sha256','provenance','current_candidates','retained_candidates',
              'assessed_candidates','current_ids','split_counts','policy','eligible_before_diversity',
              'stable_ids','reserve_ids','evidence'}
+    if not isinstance(metadata,dict): raise ValueError('invalid history metadata')
+    if metadata.get('policy') != h.LEGACY_POLICY:
+        allowed.add('selection')
     if not isinstance(metadata,dict) or set(metadata)!=allowed: raise ValueError('invalid history metadata')
     data=(root/'history.json').read_bytes()
     if hashlib.sha256(data).hexdigest()!=metadata['state_sha256']: raise ValueError('history digest mismatch')
@@ -358,7 +361,7 @@ def validate_history_outputs(root, report, results, now):
     if (run.get('run_id'),run.get('run_attempt'),run.get('implementation_sha'))!=(production['run_id'],production['run_attempt'],production['implementation_sha']):
         raise ValueError('history run mismatch')
     exports={node_id(line):line for line in (root/FEEDS['youtube']).read_text().splitlines()}
-    feeds,ranking=h.split(state,results,exports)
+    feeds,ranking=h.split_for_report(state,results,exports,report,allow_legacy=allow_legacy_split)
     if any(metadata.get(k)!=v for k,v in ranking.items()): raise ValueError('history ranking mismatch')
     if metadata['split_counts']!={key:len(lines) for key,lines in feeds.items()}:
         raise ValueError('split count mismatch')

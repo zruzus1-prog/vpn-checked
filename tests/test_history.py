@@ -55,13 +55,13 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(feeds['reserve'],[])
         self.assertEqual(proof['eligible_before_diversity'],1)
 
-    def test_caps_zero_one_39_40_41_and_overflow(self):
+    def test_one_prefix_is_not_padded_for_39_40_41_candidates(self):
         for n in (1,39,40,41):
             with self.subTest(n=n):
                 state,rows,exports=history_for([candidate(i) for i in range(1,n+1)])
                 feeds,_=h.split(state,rows,exports)
-                self.assertEqual(len(feeds['stable']),min(40,n))
-                self.assertEqual(len(feeds['reserve']),max(0,n-40))
+                self.assertEqual(len(feeds['stable']),1)
+                self.assertEqual(len(feeds['reserve']),n-1)
                 self.assertFalse(set(feeds['stable'])&set(feeds['reserve']))
                 self.assertEqual(set(feeds['stable'])|set(feeds['reserve']),set(exports.values()))
         state,rows,exports=history_for(passed=[False,False,False])
@@ -69,24 +69,25 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(feeds,{'stable':[],'reserve':[]})
         self.assertTrue(all(e['uri'] is None for e in state['entries']))
 
-    def test_time_span_speed_and_local_evidence_do_not_force_fill(self):
+    def test_time_span_speed_and_local_evidence_never_claim_strict_tier(self):
         for kwargs in ({'hours':(2,1,0)}, {'hours':(5,3,0)}, {'hours':(12,0)},
                        {'speeds':[600,511.9,600]}, {'event':'local'}):
             with self.subTest(kwargs=kwargs):
                 state,rows,exports=history_for(**kwargs)
-                feeds,_=h.split(state,rows,exports)
-                self.assertEqual(feeds['stable'],[])
-                self.assertEqual(feeds['reserve'],list(exports.values()))
+                feeds,proof=h.split(state,rows,exports)
+                self.assertEqual(proof['selection']['selected_tier_counts']['strict-history'],0)
+                self.assertFalse(proof['evidence'][rows[0]['id']]['eligible'])
+                self.assertEqual(set(feeds['stable'])|set(feeds['reserve']),set(exports.values()))
 
     def test_rapid_manual_failures_count_even_when_passes_are_spaced(self):
         state,rows,exports=history_for(hours=(12,6,5.99,0),passed=[True,True,False,True])
         feeds,proof=h.split(state,rows,exports)
-        self.assertEqual(feeds['stable'],[])
+        self.assertFalse(proof['evidence'][rows[0]['id']]['eligible'])
         self.assertEqual(proof['evidence'][rows[0]['id']]['pass_rate'],.75)
 
     def test_last_two_observed_must_pass_even_when_rate_is_90_percent(self):
         state,rows,exports=history_for(hours=tuple(range(36,-1,-4)),passed=[True]*8+[False,True])
-        self.assertEqual(h.split(state,rows,exports)[0]['stable'],[])
+        self.assertFalse(h.split(state,rows,exports)[1]['evidence'][rows[0]['id']]['eligible'])
 
     def test_same_endpoint_ip_variants_stay_in_reserve(self):
         state,rows,exports=history_for([candidate(1),candidate(2)])
@@ -299,4 +300,4 @@ class SpeedPrecisionTests(unittest.TestCase):
         state,rows,exports=history_for(speeds=[600,600,511.96])
         rows[0]['min_kib_s']=512.0
         self.assertLess(state['entries'][0]['observations'][-1]['min_kib_s'],512)
-        self.assertEqual(h.split(state,rows,exports)[0]['stable'],[])
+        self.assertFalse(h.split(state,rows,exports)[1]['evidence'][rows[0]['id']]['eligible'])
