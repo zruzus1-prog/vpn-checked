@@ -20,6 +20,7 @@ import tempfile
 import time
 
 import checker as c
+import history as h
 
 SCHEMA = 1
 SHARD_SIZE = 64
@@ -39,7 +40,7 @@ SOURCE_KEYS = {'url', 'downloaded', 'fetched_at', 'sha256', 'hash_scope', 'lines
                'rejection_categories', 'raw_protocol_counts', 'supported_protocol_counts'}
 MANIFEST_KEYS = {'schema_version', 'created_at', 'implementation_sha', 'run_id',
                  'run_attempt', 'core_lock', 'core_lock_sha256', 'sources', 'stats',
-                 'candidates', 'shard_size', 'shards'}
+                 'candidates', 'shard_size', 'shards', 'history'}
 SHARD_KEYS = {'schema_version', 'manifest_sha256', 'shard_id', 'implementation_sha',
               'started_at', 'completed_at', 'core', 'origin', 'results', 'exports'}
 
@@ -157,6 +158,7 @@ def validate_inventory(manifest):
     require(isinstance(stats, dict) and set(stats) == STAT_KEYS, 'invalid candidate statistics')
     require(isinstance(candidates, list), 'invalid candidates')
     integer(len(candidates), c.MAX_CANDIDATES, 1)
+    current_ids = set(manifest['history']['current_ids'])
     keys, ids = set(), set()
     by_source = {url: [] for url in c.SOURCES}
     parsed_candidates = []
@@ -175,9 +177,10 @@ def validate_inventory(manifest):
                 'invalid candidate provenance')
         ids.add(rid)
         keys.add(key)
-        parsed_candidates.append(parsed)
-        for url in provenance:
-            by_source[url].append(parsed)
+        if rid in current_ids:
+            parsed_candidates.append(parsed)
+            for url in provenance:
+                by_source[url].append(parsed)
     require([row['id'] for row in candidates] == sorted(ids), 'noncanonical candidate ordering')
     maximum = c.MAX_FEED_LINES * len(c.SOURCES)
     for source in sources:
@@ -208,13 +211,13 @@ def validate_inventory(manifest):
     expected = {
         'raw_lines': sum(s['lines'] for s in sources),
         'supported_lines': sum(s['supported_lines'] for s in sources),
-        'unique_candidates': len(candidates),
+        'unique_candidates': len(current_ids),
         'unique_endpoints': len({(p['type'], p['server'], p['server_port']) for p in parsed_candidates}),
         'unsupported_or_rejected_lines': sum(s['unsupported_or_rejected_lines'] for s in sources),
         'candidate_protocol_counts': dict(Counter(p['type'] for p in parsed_candidates)),
     }
-    expected['duplicate_supported_lines'] = expected['supported_lines'] - len(candidates)
-    expected['cross_source_duplicate_candidates'] = sum(s['unique_candidates'] for s in sources) - len(candidates)
+    expected['duplicate_supported_lines'] = expected['supported_lines'] - len(current_ids)
+    expected['cross_source_duplicate_candidates'] = sum(s['unique_candidates'] for s in sources) - len(current_ids)
     for key, value in expected.items():
         require(type(stats[key]) is type(value) and stats[key] == value,
                 'inconsistent global candidate statistics')
@@ -236,6 +239,7 @@ def validate_manifest(manifest, *, now=None):
     lock, lock_digest = local_lock()
     require(manifest['core_lock'] == lock and manifest['core_lock_sha256'] == lock_digest,
             'manifest core lock mismatch')
+    validate_history_manifest(manifest, now)
     validate_inventory(manifest)
     for source in manifest['sources']:
         fresh(source['fetched_at'], now)
@@ -248,6 +252,51 @@ def validate_manifest(manifest, *, now=None):
     return manifest
 
 
+def validate_history_manifest(manifest, now):
+    history = manifest['history']
+    require(isinstance(history, dict) and set(history) == {'state', 'provenance', 'current_ids', 'event'},
+            'invalid historical manifest')
+    require(history['event'] in ('schedule', 'workflow_dispatch', 'local'), 'invalid history event')
+    h.validate(history['state'], now=now)
+    require(instant(history['state']['created_at']) <= instant(manifest['created_at']), 'future history state')
+    provenance = history['provenance']
+    require(isinstance(provenance, dict) and set(provenance) == {'checked_commit', 'authenticated_snapshots', 'mode'},
+            'invalid history provenance')
+    if provenance['checked_commit'] is not None:
+        hex_value(provenance['checked_commit'], 40)
+    integer(provenance['authenticated_snapshots'], h.MAX_RUNS)
+    require(provenance['mode'] in ('cold-start', 'retained-state', 'verified-bootstrap', 'expired-history', 'local-empty'),
+            'invalid history provenance mode')
+    current_ids = history['current_ids']
+    require(isinstance(current_ids, list) and current_ids == sorted(set(current_ids)), 'invalid current inventory')
+    by_id = {row['id']: row for row in manifest['candidates']}
+    require(set(current_ids) <= set(by_id), 'missing current candidate')
+    historical = {e['id']: e for e in h.prune(history['state'], instant(manifest['created_at']))['entries']
+                  if any(o['youtube'] for o in e['observations'])}
+    retained = set(by_id)-set(current_ids)
+    require(retained == set(historical)-set(current_ids), 'incomplete retained candidate inventory')
+    for rid in retained:
+        require(by_id[rid] == {k: historical[rid][k] for k in ('id', 'uri', 'sources')},
+                'historical candidate altered')
+
+
+def build_history(manifest, results, exports):
+    by_id = {row['id']: row for row in manifest['candidates']}
+    current = [by_id[rid] for rid in manifest['history']['current_ids']]
+    times = {source['url']: source['fetched_at'] for source in manifest['sources']}
+    state = h.update(manifest['history']['state'], current, results,
+                     at=manifest['created_at'], implementation_sha=manifest['implementation_sha'],
+                     run_id=manifest['run_id'], run_attempt=manifest['run_attempt'],
+                     event=manifest['history']['event'],
+                     seen_at={row['id']: max(times[u] for u in row['sources']) for row in current})
+    feeds, ranking = h.split(state, results, exports)
+    metadata = {'state_sha256': digest(h.encoded(state)), 'provenance': manifest['history']['provenance'],
+                'current_candidates': len(current), 'retained_candidates': len(by_id)-len(current),
+                'assessed_candidates': len(by_id), 'current_ids': manifest['history']['current_ids'],
+                'split_counts': {key: len(value) for key, value in feeds.items()}, **ranking}
+    return state, feeds, metadata
+
+
 def load_manifest(path, digest_path=None):
     manifest, actual_digest = read_json(path, MAX_MANIFEST_BYTES)
     digest_path = digest_path or Path(path).with_suffix('.sha256')
@@ -257,7 +306,7 @@ def load_manifest(path, digest_path=None):
     return validate_manifest(manifest), actual_digest
 
 
-def prepare(path):
+def prepare(path, *, use_history=False):
     normalized, provenance, sources, stats = c.collect_candidates()
     # Keep source failures distinct from failed node probes; this contains no URI.
     write_json(Path(path).parent / 'prepare-summary.json',
@@ -266,15 +315,26 @@ def prepare(path):
                       'sources_expected': len(c.SOURCES), 'supported_candidates': len(normalized)}))
     require(len(sources) == len(c.SOURCES) and all(s.get('downloaded') is True for s in sources),
             'one or more sources unavailable; do not publish')
-    integer(len(normalized), c.MAX_CANDIDATES, 1)
+    integer(len(normalized), c.MAX_CANDIDATES)
     implementation, run_id, attempt = runtime_identity()
     lock, lock_digest = local_lock()
     candidates = sorted(({'id': c.node_id(uri), 'uri': uri, 'sources': provenance[key]}
                          for key, uri in normalized.items()), key=lambda row: row['id'])
-    manifest = {'schema_version': SCHEMA, 'created_at': now_iso(),
+    created_at = now_iso()
+    if use_history:
+        state, provenance_info = h.load_remote(os.environ.get('GITHUB_REPOSITORY', ''),
+                                              os.environ.get('GH_TOKEN'), now=instant(created_at))
+    else:
+        state, provenance_info = h.empty(created_at), {'checked_commit': None, 'authenticated_snapshots': 0, 'mode': 'local-empty'}
+    current_ids = [row['id'] for row in candidates]
+    candidates, state = h.nominate(state, candidates, created_at)
+    integer(len(candidates), c.MAX_CANDIDATES, 1)
+    history_info = {'state': state, 'provenance': provenance_info, 'current_ids': current_ids,
+                    'event': os.environ.get('GITHUB_EVENT_NAME', 'local')}
+    manifest = {'schema_version': SCHEMA, 'created_at': created_at,
                 'implementation_sha': implementation, 'run_id': run_id, 'run_attempt': attempt,
                 'core_lock': lock, 'core_lock_sha256': lock_digest,
-                'sources': sources, 'stats': stats, 'candidates': candidates,
+                'sources': sources, 'stats': stats, 'candidates': candidates, 'history': history_info,
                 'shard_size': SHARD_SIZE,
                 'shards': [{'id': f'{index // SHARD_SIZE:03d}',
                             'candidate_ids': [row['id'] for row in candidates[index:index+SHARD_SIZE]]}
@@ -287,6 +347,7 @@ def prepare(path):
         with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
             handle.write('matrix=' + json.dumps(matrix, separators=(',', ':')) + '\n')
             handle.write('manifest_sha256=' + actual_digest + '\n')
+            handle.write('history_commit=' + (provenance_info['checked_commit'] or '') + '\n')
     print(json.dumps({'candidates': len(candidates), 'shards': len(manifest['shards']),
                       'manifest_sha256': actual_digest}))
     return manifest
@@ -417,6 +478,18 @@ def production_metadata(manifest, manifest_digest, receipts):
             'shards': receipts}
 
 
+def resource_summary(results, receipts, started_at):
+    attempts = [attempt for row in results for attempt in row.get('attempts', [])]
+    finish = max((instant(receipt['completed_at']) for receipt in receipts), default=instant(started_at))
+    return {'measured_response_body_bytes': sum(attempt.get('bytes', 0) for attempt in attempts),
+            'body_accounting_scope': 'curl-reported bodies only; excludes TLS/proxy overhead and aborted unmeasured bodies',
+            'http_attempts': len(attempts), 'assessment_wall_seconds': (finish-instant(started_at)).total_seconds(),
+            'summed_shard_seconds': sum((instant(r['completed_at'])-instant(r['started_at'])).total_seconds() for r in receipts),
+            'candidate_limit': c.MAX_CANDIDATES, 'maximum_parallel_shards': MAX_PARALLEL,
+            'maximum_body_bound_bytes': len(results)*(c.DOWNLOAD_BYTES*2*c.MAX_ATTEMPTS+8*1024*1024+
+                                               1024*c.MAX_ATTEMPTS*(len(c.QUICK_ENDPOINTS)*c.MAX_ENDPOINT_ADDRESSES+3))}
+
+
 def merge(manifest_path, shard_dir, output):
     manifest, manifest_digest = load_manifest(manifest_path)
     shard_dir = Path(shard_dir)
@@ -457,8 +530,14 @@ def merge(manifest_path, shard_dir, output):
                 if row['service_qualified'][service]:
                     accepted[service].append(uri)
     metadata = production_metadata(manifest, manifest_digest, receipts)
+    state, split_feeds, history_metadata = build_history(manifest, all_results, all_exports)
+    resources = resource_summary(all_results, receipts, manifest['created_at'])
     c.write_report(Path(output), manifest['sources'], manifest['stats'], all_results, accepted,
-                   manifest['created_at'], core_info, {'production': metadata})
+                   manifest['created_at'], core_info, {'production': metadata, 'history': history_metadata, 'resources': resources})
+    write_json(Path(output) / 'history.json', state, h.MAX_BYTES)
+    for key, filename in h.SPLIT_FEEDS.items():
+        lines = split_feeds[key]
+        (Path(output) / filename).write_text('\n'.join(lines) + ('\n' if lines else ''), encoding='utf-8')
     verify_public(manifest_path, output)
     print(json.dumps({'assessed': len(all_results), 'shards': len(receipts),
                       'feed_counts': {name: len(lines) for name, lines in accepted.items()}}))
@@ -511,6 +590,21 @@ def verify_public(manifest_path, output):
         validate_results(manifest, [by_id[rid] for rid in shard['candidate_ids']],
                          {rid: uri for rid, uri in exports.items() if rid in shard['candidate_ids']},
                          shard['candidate_ids'], started_at=receipt['started_at'], completed_at=receipt['completed_at'])
+    state, split_feeds, history_metadata = build_history(manifest, results, exports)
+    require(report['history'] == history_metadata, 'public history evidence mismatch')
+    actual_state, state_hash = read_json(Path(output) / 'history.json', h.MAX_BYTES)
+    require(actual_state == state and state_hash == history_metadata['state_sha256'], 'public history state mismatch')
+    for key, filename in h.SPLIT_FEEDS.items():
+        require(read_bytes(Path(output) / filename, 4_000_000).decode('utf-8').splitlines() == split_feeds[key],
+                'public split feed mismatch')
+    require(report['resources'] == resource_summary(results, receipts, manifest['created_at']),
+            'public resource accounting mismatch')
+    expected_report = c.report_payload(manifest['sources'], manifest['stats'], results,
+        {key: read_bytes(Path(output)/filename, 4_000_000).decode('utf-8').splitlines() for key, filename in c.FEEDS.items()},
+        manifest['created_at'], report['core'],
+        {'production': production, 'history': history_metadata, 'resources': report['resources']},
+        completed_at=report['completed_at'])
+    require(report == expected_report, 'public report metadata mismatch')
     return report
 
 
@@ -519,6 +613,7 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     prepare_parser = commands.add_parser('prepare')
     prepare_parser.add_argument('--manifest', required=True)
+    prepare_parser.add_argument('--history', action='store_true')
     for name in ('shard', 'merge', 'verify-public'):
         command = commands.add_parser(name)
         command.add_argument('--manifest', required=True)
@@ -530,7 +625,7 @@ def main():
             command.add_argument('--shards', required=True)
     args = parser.parse_args()
     if args.command == 'prepare':
-        prepare(args.manifest)
+        prepare(args.manifest, use_history=args.history)
     elif args.command == 'shard':
         check_shard(args.manifest, args.shard, args.output, args.core)
     elif args.command == 'merge':

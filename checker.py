@@ -311,7 +311,7 @@ def safe_source_label(value, limit=36):
     """Keep a compact plain-text source name; remove controls, bidi and markup."""
     if not isinstance(value,str): return ''
     value=unicodedata.normalize('NFC',value)
-    allowed_punctuation=set(' .,-_|()[]')
+    allowed_punctuation=set(' .,-_|()[]…')
     value=''.join(char if (unicodedata.category(char)[0] in 'LMN' or
                          unicodedata.category(char)=='So' or char in allowed_punctuation)
                   else ' ' for char in value)
@@ -331,6 +331,9 @@ def safe_source_label(value, limit=36):
 def source_name(uri):
     u=U.urlsplit(uri)
     name=U.unquote(u.fragment)
+    protocol={'ss':'SS','vless':'VLESS','vmess':'VMess','trojan':'Trojan','hy2':'HY2','hysteria2':'HY2'}.get(u.scheme.lower())
+    suffix=f" · {protocol} · {node_id(uri)[:6]}"
+    if name.endswith(suffix): name=name[:-len(suffix)]
     if not name and u.scheme.lower()=='vmess':
         try: name=json.loads(b64(u.netloc+u.path)).get('ps','')
         except (ValueError,AttributeError,RecursionError): name=''
@@ -627,14 +630,13 @@ def coverage_summary(sources, total, results):
             'deep_cap_skipped':skipped_deep,'complete_supported':complete}
 
 
-def write_report(output,sources,stats,results,accepted,started_at,core_metadata=None,extra_metadata=None):
-    output=Path(output);output.mkdir(exist_ok=True,parents=True)
-    report={'schema_version':4,'started_at':started_at,'completed_at':utc_now(),
+def report_payload(sources,stats,results,accepted,started_at,core_metadata=None,extra_metadata=None,completed_at=None):
+    report={'schema_version':4,'started_at':started_at,'completed_at':completed_at or utc_now(),
         'vantage':'Recorded probe origin only; not the user network',
         'probe_origin':probe_origin(),'identity_version':CANONICALIZATION_VERSION,
         'identity_scope':'supported-authenticated-stream-settings; REALITY fallback spx variants may deduplicate',
         'core':core_metadata,'sources':sources,**stats,'sampled':len(results),
-        'coverage':coverage_summary(sources,stats['unique_candidates'],results),
+        'coverage':coverage_summary(sources,(extra_metadata or {}).get('history',{}).get('assessed_candidates',stats['unique_candidates']),results),
         'deep_tested':sum(r.get('deep_tested') is True for r in results),
         'qualified':len(accepted['both']),'feed_counts':{key:len(lines) for key,lines in accepted.items()},
         'results':results,
@@ -656,6 +658,12 @@ def write_report(output,sources,stats,results,accepted,started_at,core_metadata=
     if extra_metadata:
         if set(extra_metadata)&set(report): raise ValueError('metadata cannot override report fields')
         report.update(extra_metadata)
+    return report
+
+
+def write_report(output,sources,stats,results,accepted,started_at,core_metadata=None,extra_metadata=None):
+    output=Path(output);output.mkdir(exist_ok=True,parents=True)
+    report=report_payload(sources,stats,results,accepted,started_at,core_metadata,extra_metadata)
     for key,filename in FEEDS.items():
         (output/filename).write_text('\n'.join(accepted[key])+ ('\n' if accepted[key] else ''))
     (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')

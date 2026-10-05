@@ -152,6 +152,9 @@ def validate_attempts(row):
                 raise ValueError('stability checkpoints compressed')
     if not timestamp(final_proofs['quick-https']['started_at'])<=baseline<=timestamp(final_proofs['download-1']['started_at'])<=timestamp(final_proofs['stability-15']['started_at'])<=timestamp(final_proofs['stability-30']['started_at'])<=timestamp(final_proofs['stability-45']['started_at'])<=timestamp(final_proofs['download-2']['started_at']):
         raise ValueError('baseline stage order mismatch')
+    measured=[round(DOWNLOAD_BYTES/number(final_proofs['download-'+str(i)]['elapsed_seconds'])/1024,1) for i in (1,2)]
+    if row.get('download_kib_s')!=measured or row.get('min_kib_s')!=min(measured):
+        raise ValueError('download summary differs from attempt proof')
     for name,passed in row.get('service_qualified',{}).items():
         if not passed: continue
         proof=diagnostics.get(name)
@@ -216,9 +219,21 @@ def validate_coverage(report, results):
     if count(report['cross_source_duplicate_candidates'],maximum)!=totals['unique_candidates']-unique:
         raise ValueError('inconsistent cross-source duplicates')
     histogram(report['candidate_protocol_counts'],PROTOCOLS,unique)
-    if unique>MAX_CANDIDATES or len(results)!=unique:
+    history=report.get('history')
+    assessed=unique
+    if history is not None:
+        current_ids=history.get('current_ids')
+        if not isinstance(current_ids,list) or len(current_ids)!=unique or len(set(current_ids))!=unique:
+            raise ValueError('invalid current upstream inventory')
+        result_ids={row['id'] for row in results}
+        if not set(current_ids)<=result_ids: raise ValueError('missing upstream assessment')
+        if history.get('current_candidates')!=unique: raise ValueError('inconsistent current inventory')
+        retained=count(history['retained_candidates'],MAX_CANDIDATES)
+        assessed=unique+retained
+        if history['assessed_candidates']!=assessed: raise ValueError('inconsistent retained coverage')
+    if assessed>MAX_CANDIDATES or len(results)!=assessed:
         raise ValueError('incomplete candidate selection')
-    expected=coverage_summary(sources,unique,results)
+    expected=coverage_summary(sources,assessed,results)
     actual=report['coverage']
     if not expected['complete_supported']: raise ValueError('incomplete supported coverage')
     if not isinstance(actual,dict) or actual!=expected:
@@ -227,23 +242,32 @@ def validate_coverage(report, results):
         if type(actual[key]) is not type(value): raise ValueError('invalid coverage types')
 
 
-def validate(root):
+def validate(root, *, as_of=None):
     root=Path(root)
-    if {p.name for p in root.iterdir()} != {*FEEDS.values(), 'report.json'}:
+    now=as_of or datetime.now(timezone.utc)
+    from history import strict_json
+    report_path=root/'report.json'
+    if report_path.is_symlink() or not report_path.is_file() or report_path.stat().st_size>32_000_000:
+        raise ValueError('invalid report file')
+    report=strict_json(report_path.read_bytes())
+    extra_files=set()
+    if isinstance(report,dict) and 'history' in report:
+        from history import SPLIT_FEEDS
+        extra_files={*SPLIT_FEEDS.values(),'history.json'}
+    if {p.name for p in root.iterdir()} != {*FEEDS.values(), 'report.json'}|extra_files:
         raise ValueError('unexpected output files')
     for p in root.iterdir():
-        if p.is_symlink() or not p.is_file() or p.stat().st_size > (32_000_000 if p.name=='report.json' else 4_000_000):
+        if p.is_symlink() or not p.is_file() or p.stat().st_size > (32_000_000 if p.name=='report.json' else 12*1024*1024 if p.name=='history.json' else 4_000_000):
             raise ValueError('invalid output file')
-    report=json.loads((root/'report.json').read_text())
     allowed={'schema_version','started_at','completed_at','vantage','probe_origin','identity_version',
         'identity_scope','core','sources','raw_lines','raw_unique_lines','supported_lines','unique_candidates',
         'unique_endpoints','duplicate_supported_lines','cross_source_duplicate_candidates',
         'unsupported_or_rejected_lines','candidate_protocol_counts','sampled','coverage','deep_tested',
         'qualified','feed_counts','results','method','interpretation','diagnostics','limits','max_age_hours',
-        'freshness_note','production'}
+        'freshness_note','production','history','resources'}
     if not isinstance(report,dict) or set(report)-allowed: raise ValueError('unexpected public report fields')
     if report.get('schema_version') != 4: raise ValueError('unknown schema')
-    age=(datetime.now(timezone.utc)-datetime.fromisoformat(report['completed_at'])).total_seconds()
+    age=(now-datetime.fromisoformat(report['completed_at'])).total_seconds()
     if not 0 <= age < 3600: raise ValueError('stale output')
     if report.get('identity_version')!=CANONICALIZATION_VERSION: raise ValueError('unknown identity version')
     origin=report.get('probe_origin',{})
@@ -265,7 +289,7 @@ def validate(root):
         ids.add(rid);results_by_id[rid]=row
         if row.get('identity_version')!=CANONICALIZATION_VERSION: raise ValueError('bad node identity version')
         checked=timestamp(row['checked_at']);completed=timestamp(row['completed_at'])
-        if completed<checked or (datetime.now(timezone.utc)-checked).total_seconds()>MAX_RESULT_AGE_SECONDS:
+        if completed<checked or (now-checked).total_seconds()>MAX_RESULT_AGE_SECONDS:
             raise ValueError('stale node measurement')
         if row.get('reason') in ('budget','deep-budget','core-start-failed','core-stopped'):
             raise ValueError('incomplete/infrastructure failure')
@@ -314,6 +338,50 @@ def validate(root):
     if count(report['qualified'],deep) != report['feed_counts']['both']:
         raise ValueError('inconsistent primary count')
     validate_coverage(report,results)
+    if 'history' in report:
+        validate_history_outputs(root,report,results,now)
+
+
+def validate_history_outputs(root, report, results, now):
+    import history as h
+    metadata=report['history']
+    allowed={'state_sha256','provenance','current_candidates','retained_candidates',
+             'assessed_candidates','current_ids','split_counts','policy','eligible_before_diversity',
+             'stable_ids','reserve_ids','evidence'}
+    if not isinstance(metadata,dict) or set(metadata)!=allowed: raise ValueError('invalid history metadata')
+    data=(root/'history.json').read_bytes()
+    if hashlib.sha256(data).hexdigest()!=metadata['state_sha256']: raise ValueError('history digest mismatch')
+    state=h.validate(h.strict_json(data),now=now,require_recent=True)
+    if state['created_at']!=report['started_at']: raise ValueError('history snapshot mismatch')
+    production=report['production']
+    run=state['runs'][-1] if state['runs'] else {}
+    if (run.get('run_id'),run.get('run_attempt'),run.get('implementation_sha'))!=(production['run_id'],production['run_attempt'],production['implementation_sha']):
+        raise ValueError('history run mismatch')
+    exports={node_id(line):line for line in (root/FEEDS['youtube']).read_text().splitlines()}
+    feeds,ranking=h.split(state,results,exports)
+    if any(metadata.get(k)!=v for k,v in ranking.items()): raise ValueError('history ranking mismatch')
+    if metadata['split_counts']!={key:len(lines) for key,lines in feeds.items()}:
+        raise ValueError('split count mismatch')
+    for key,filename in h.SPLIT_FEEDS.items():
+        if (root/filename).read_text().splitlines()!=feeds[key]: raise ValueError('split feed mismatch')
+    entries={entry['id']:entry for entry in state['entries']}
+    current=set(metadata['current_ids'])
+    source_times={source['url']:timestamp(source['fetched_at']) for source in report['sources']}
+    for row in results:
+        entry=entries.get(row['id'])
+        if entry is None: raise ValueError('missing history assessment')
+        observation=entry['observations'][-1]
+        passed=row['service_qualified']['youtube']
+        expected={'run_id':production['run_id'],'youtube':passed,
+                  'min_kib_s':h.measured_min_speed(row) if passed else None,
+                  'median_ms':row.get('median_ms') if passed else None,
+                  'tested_address':row.get('tested_address') if passed else None}
+        if observation!=expected: raise ValueError('history outcome mismatch')
+        seen=timestamp(entry['last_upstream_seen_at'])
+        if row['id'] in current:
+            if seen!=max(source_times[u] for u in row['sources']): raise ValueError('source presence time mismatch')
+        elif (now-seen).total_seconds()>h.MAX_AGE_SECONDS:
+            raise ValueError('historical candidate expired before publication')
 
 
 if __name__=='__main__': validate(sys.argv[1])

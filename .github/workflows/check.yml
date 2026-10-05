@@ -8,7 +8,7 @@ on:
         required: false
         default: false
   schedule:
-    - cron: '23 */6 * * *'
+    - cron: '23 */2 * * *'
 permissions:
   contents: read
 concurrency:
@@ -20,7 +20,9 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      actions: read
     outputs:
+      history_commit: ${{ steps.freeze.outputs.history_commit }}
       matrix: ${{ steps.freeze.outputs.matrix }}
       manifest_sha256: ${{ steps.freeze.outputs.manifest_sha256 }}
     steps:
@@ -30,9 +32,11 @@ jobs:
           persist-credentials: false
       - name: Offline tests
         run: python3 -m unittest discover -s tests -v
-      - name: Freeze every supported candidate from all sources once
+      - name: Freeze current sources and authenticated 48-hour retest history
         id: freeze
-        run: python3 production.py prepare --manifest /tmp/frozen/manifest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 production.py prepare --history --manifest /tmp/frozen/manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -143,12 +147,15 @@ jobs:
           echo "$EXPECTED_MANIFEST_SHA256  /tmp/frozen/manifest.json" | sha256sum --check --status
           python3 production.py verify-public --manifest /tmp/frozen/manifest.json --output /tmp/checked-output
       - name: Preserve checked history and publish with a concurrent-update lease
+        env:
+          HISTORY_COMMIT: ${{ needs.prepare.outputs.history_commit }}
         run: |
           set -euo pipefail
           test "$(git ls-remote --heads origin refs/heads/main | cut -f1)" = "$GITHUB_SHA"
           cp LICENSE NOTICE.md /tmp/checked-output/
           cp -r licenses /tmp/checked-output/
           expected="$(git ls-remote --heads origin refs/heads/checked | cut -f1)"
+          test "$expected" = "$HISTORY_COMMIT"
           if [ -n "$expected" ]; then
             git fetch --no-tags origin refs/heads/checked
             test "$(git rev-parse FETCH_HEAD)" = "$expected"
@@ -158,7 +165,7 @@ jobs:
           fi
           git rm -r --ignore-unmatch .
           cp -r /tmp/checked-output/. .
-          git add -- subscription.txt subscription-gpt.txt subscription-youtube.txt report.json LICENSE NOTICE.md licenses
+          git add -- subscription.txt subscription-gpt.txt subscription-youtube.txt subscription-youtube-stable.txt subscription-youtube-reserve.txt history.json report.json LICENSE NOTICE.md licenses
           if git diff --cached --quiet; then
             echo 'Snapshot unchanged; nothing to publish.'
             exit 0
