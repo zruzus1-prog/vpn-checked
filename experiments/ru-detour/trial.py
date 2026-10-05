@@ -35,15 +35,26 @@ MAX_HEALTHY = 2
 MAX_CANDIDATES = 24
 ROUNDS = 2
 ROUND_GAP = 90
-TOTAL_SECONDS = 24 * 60
-PAYLOAD_LIMIT = 196 * 1024 * 1024
+TOTAL_SECONDS = 20 * 60
+PREVIOUS_OBSERVED_BYTES = 579195
+PREVIOUS_RESERVED_BYTES = 38027264
+PREVIOUS_LIVE_SECONDS = 42.839
+PREVIOUS_RUN_ID = 37355709446
+PAYLOAD_LIMIT = 196 * 1024 * 1024 - PREVIOUS_RESERVED_BYTES
+RECHECK_HOP_IDS = {'400b3ba29801032a','4aa51b7b19565c3e','4c572f1024425ca7','6e6b9c0d1fdcf892',
+                   '7b8b0d577e626905','a40b47ec1b339108','ab9f4f3938535877','b5f4d516e17a1807',
+                   'c67b850a8fa6c578','fe6e1ed0fe57e1d4'}
 TCP_TYPES = {'vless', 'shadowsocks', 'vmess', 'trojan'}
-EGRESS = [('ipify', 'https://api.ipify.org?format=json'),
-          ('myip', 'https://api.myip.com/')]
+IP_SERVICES = [('cloudflare', 'https://www.cloudflare.com/cdn-cgi/trace', 'trace'),
+               ('aws', 'https://checkip.amazonaws.com/', 'text'),
+               ('ipify', 'https://api.ipify.org?format=json', 'json'),
+               ('myip', 'https://api.myip.com/', 'json')]
+ACTIVE_EGRESS = []
 NEUTRAL = 'https://www.gstatic.com/generate_204'
 YOUTUBE = 'https://www.youtube.com/'
 PUBLIC_HOSTS = {'api.ipify.org', 'api.myip.com', 'ipwho.is', 'ipapi.co',
-                'www.gstatic.com', 'www.youtube.com', 'raw.githubusercontent.com'}
+                'www.gstatic.com', 'www.youtube.com', 'raw.githubusercontent.com',
+                'www.cloudflare.com', 'checkip.amazonaws.com'}
 
 class Unknown(Exception):
     pass
@@ -62,9 +73,13 @@ class Budget:
                 self.exhausted = True
                 raise Unknown('budget-exhausted')
             self.reserved += amount
-    def observe(self, amount):
+    def observe(self, amount, allocation):
         with self.lock:
             self.observed += amount
+            # Release unused reservation only after the process has terminated and its file is measured.
+            # Process-level timeouts retain the entire cap, covering unobserved partial bytes.
+            self.reserved += amount-allocation
+            if self.reserved>self.maximum:self.exhausted=True
 
 BUDGET = Budget()
 DNS_CACHE = {}
@@ -113,7 +128,7 @@ def request(url, session=None, limit=16384, timeout=12):
         except subprocess.TimeoutExpired:
             raise Unknown('curl-process-timeout') from None
         data = target.read_bytes() if target.exists() else b''
-        BUDGET.observe(len(data))
+        BUDGET.observe(len(data),limit)
         try:
             status, size, elapsed = proc.stdout.decode('ascii').split()
             status, size, elapsed = int(status), int(size), float(elapsed)
@@ -204,14 +219,55 @@ def core_session(out, hop=None):
             except subprocess.TimeoutExpired: proc.kill(); proc.wait()
 
 
-def egress(session):
-    observations = []
-    for name, url in EGRESS:
-        result = get_json(url, session)
-        address = str(ipaddress.ip_address(result['ip']))
-        if not c.public_ip(address): raise Unknown('nonpublic-egress')
-        observations.append({'service': name, 'ip': address})
-    if observations[0]['ip'] != observations[1]['ip']:
+def ip_observation(service, session=None):
+    name,url,kind=service
+    observation={'service':name,'checked_at':c.utc_now(),'healthy':False}
+    try:
+        detail,data=request(url,session)
+        observation.update(detail)
+        if detail.get('error') or detail['http_status']!=200:
+            observation['reason']=detail.get('error','http-not-200');return observation
+        if kind=='json':
+            value=json.loads(data)
+            if not isinstance(value,dict):raise Unknown('ip-schema-invalid')
+            address=value['ip']
+        elif kind=='trace':
+            values=[line[3:] for line in data.decode('ascii').splitlines() if line.startswith('ip=')]
+            if len(values)!=1:raise Unknown('ip-schema-invalid')
+            address=values[0]
+        elif kind=='text':address=data.decode('ascii').strip()
+        else:raise Unknown('ip-format-invalid')
+        if not isinstance(address,str) or '%' in address:raise Unknown('ip-schema-invalid')
+        address=str(ipaddress.ip_address(address))
+        if not c.public_ip(address):raise Unknown('nonpublic-egress')
+        observation.update(ip=address,healthy=True)
+    except (ValueError,TypeError,RecursionError,KeyError,OSError,subprocess.SubprocessError,Unknown) as exc:
+        observation['reason']=fixed_error(exc)
+    return observation
+
+
+def establish_egress_controls():
+    global ACTIVE_EGRESS
+    ACTIVE_EGRESS=[]
+    observations=[ip_observation(service) for service in IP_SERVICES]
+    good=[(service,obs) for service,obs in zip(IP_SERVICES,observations) if obs['healthy']]
+    # Independent operators with equal observed egress. Never silently relax to one service.
+    for index,(first,obs) in enumerate(good):
+        for second,other in good[index+1:]:
+            if first[0]!=second[0] and obs['ip']==other['ip']:
+                ACTIVE_EGRESS=[first,second]
+                return observations,obs['ip']
+    return observations,None
+
+
+def egress(session, observations=None):
+    observations=[] if observations is None else observations
+    if len(ACTIVE_EGRESS)!=2:raise Unknown('egress-controls-not-established')
+    for service in ACTIVE_EGRESS:
+        result=ip_observation(service,session)
+        observations.append(result)
+        if not result['healthy']:raise Unknown('egress-service-not-confirmed')
+    if observations[0]['ip']!=observations[1]['ip']:
         raise Unknown('egress-services-disagree')
     return observations
 
@@ -251,21 +307,27 @@ def validate_hop(item, cloud_ip=None):
     record = {'id': item['id'], 'checked_at': c.utc_now(), 'state': 'unknown',
               'source_indexes': item['source_indexes'], 'physical_russia_confirmed': False}
     try:
+        record['stage']='endpoint-validation'
         out, meta = prepare_outbound(item['uri']); record.update(meta)
+        record['stage']='core-start'
         with core_session(out) as session:
-            observations = egress(session)
-            neutral, _ = request(NEUTRAL, session)
+            record['stage']='neutral-https'
+            neutral, _ = request(NEUTRAL, session);record['neutral']=neutral
             if neutral.get('error') or neutral['http_status']!=204:
-                raise Unknown('hop-neutral-failed')
-        record['egress'] = observations
+                raise Unknown('hop-neutral-not-confirmed')
+            record['stage']='egress-attribution'
+            record['egress']=[]
+            observations = egress(session,record['egress'])
         if cloud_ip and observations[0]['ip']==cloud_ip:
             raise Unknown('hop-egress-equals-cloud-baseline')
+        record['stage']='geo-attribution'
         record['geo'] = geolocate(observations[0]['ip'])
         record['geo_confidence'] = 'two-database-agreement' if qualify_geo(record['geo']) else 'not-established'
         complete_geo=len(record['geo'])==2 and all(x.get('country_code') and x.get('asn') and not x.get('error') for x in record['geo'])
         record['state'] = 'apparently-ru-healthy' if qualify_geo(record['geo']) else ('not-qualified' if complete_geo else 'unknown')
         if record['state']=='unknown':record['reason']='geo-not-established'
         if record['state']=='apparently-ru-healthy':
+            record['stage']='qualified'
             record['asn'] = next(x['asn'] for x in record['geo'] if x.get('asn'))
             return record, out
     except (ValueError, TypeError, RecursionError, KeyError, OSError, subprocess.SubprocessError, Unknown) as exc:
@@ -277,9 +339,11 @@ def hop_control(out, expected_ip):
     result = {'checked_at': c.utc_now(), 'healthy': False}
     try:
         with core_session(out) as session:
-            result['egress'] = egress(session)
             detail, _ = request(NEUTRAL, session)
             result['neutral'] = detail
+            if detail.get('error') or detail['http_status']!=204:raise Unknown('control-neutral-not-confirmed')
+            result['egress']=[]
+            egress(session,result['egress'])
             result['healthy'] = (result['egress'][0]['ip']==expected_ip and
                                  detail['http_status']==204 and not detail.get('error'))
     except (ValueError, TypeError, RecursionError, KeyError, OSError, subprocess.SubprocessError, Unknown) as exc:
@@ -364,6 +428,16 @@ def choose_hops(items):
     return selected, dict(rejected)
 
 
+def load_selection():
+    selected=json.loads((OUT/'selection.json').read_text())
+    if not isinstance(selected,list) or not (1<=len(selected)<=MAX_CANDIDATES):raise Unknown('selection-invalid')
+    if any(not isinstance(x,dict) or not re.fullmatch('[0-9a-f]{16}',x.get('id','')) or
+           x.get('group') not in ('stable-local-negative','reserve-unconfirmed','prior-local-positive') for x in selected):
+        raise Unknown('selection-invalid')
+    if len({x['id'] for x in selected})!=len(selected):raise Unknown('selection-duplicates')
+    return selected
+
+
 def load_inputs():
     items={}; sources=[]
     for index, url in enumerate(c.SOURCES):
@@ -383,12 +457,7 @@ def load_inputs():
                             'sha256':hashlib.sha256(data).hexdigest(), 'lines':len(lines), 'rejected':rejected})
         except (ValueError,TypeError,RecursionError,OSError,subprocess.SubprocessError,Unknown) as exc:
             sources.append({'index':index,'url':url,'error':fixed_error(exc)})
-    selected=json.loads((OUT/'selection.json').read_text())
-    if not isinstance(selected,list) or not (1<=len(selected)<=MAX_CANDIDATES):raise Unknown('selection-invalid')
-    if any(not isinstance(x,dict) or not re.fullmatch('[0-9a-f]{16}',x.get('id','')) or
-           x.get('group') not in ('stable-local-negative','reserve-unconfirmed','prior-local-positive') for x in selected):
-        raise Unknown('selection-invalid')
-    if len({x['id'] for x in selected})!=len(selected):raise Unknown('selection-duplicates')
+    selected=load_selection()
     # The checked commit pins the actual user-visible negative/control cohort.
     snapshot={}
     for group, filename in [('stable-local-negative','subscription-youtube-stable.txt'),
@@ -406,10 +475,13 @@ def load_inputs():
         elif ident in items and row['group']=='prior-local-positive':
             item=dict(items[ident]); item['group']=row['group']; candidates.append(item)
         else: absent.append({'id':ident,'group':row['group'],'reason':'snapshot-config-unavailable'})
-    hops, excluded=choose_hops(list(items.values()))
+    previous_pool=[item for ident,item in items.items() if ident in RECHECK_HOP_IDS]
+    hops, excluded=choose_hops(previous_pool)
     return candidates,hops,{'sources':sources,'candidate_ids':[{'id':x['id'],'group':x['group']} for x in candidates],
                            'missing_candidates':absent,'hop_ids':[x['id'] for x in hops],
-                           'hop_label_hints_only':True,'hop_unsupported':excluded}
+                           'hop_label_hints_only':True,'hop_unsupported':excluded,
+                           'recheck_only_previous_hop_ids':True,
+                           'previous_hops_unavailable_or_excluded':sorted(RECHECK_HOP_IDS-{x['id'] for x in hops})}
 
 
 def save(report):
@@ -417,6 +489,8 @@ def save(report):
 
 
 def run():
+    started_monotonic=time.monotonic()
+    candidates=[];expected_candidates=[]
     report={'schema_version':1,'started_at':c.utc_now(),'main_commit':BASE_COMMIT,'checked_commit':CHECKED_COMMIT,
             'scope':'encrypted-TCP-accessibility-only','physical_russia_confirmed':False,'user_isp_tested':False,
             'selection_scope':'deliberately-diversity-enriched-exact-24-not-population-representative',
@@ -425,16 +499,24 @@ def run():
             'limits':{'max_hop_candidates':MAX_HOPS,'max_healthy_hops':MAX_HEALTHY,'max_candidates':MAX_CANDIDATES,
                       'rounds':ROUNDS,'round_gap_seconds':ROUND_GAP,'workers':WORKERS,
                       'application_payload_reservation_cap':PAYLOAD_LIMIT,'wall_seconds':TOTAL_SECONDS},
-            'hop_validation':[],'batches':[],'status':'running'}
+            'hop_validation':[],'batches':[],'status':'running',
+            'previous_run':{'run_id':PREVIOUS_RUN_ID,'observed_bytes':PREVIOUS_OBSERVED_BYTES,
+                            'reserved_bytes':PREVIOUS_RESERVED_BYTES,'live_seconds':PREVIOUS_LIVE_SECONDS}}
     save(report)
     try:
+        expected_candidates=load_selection()
+        report['expected_candidate_ids']=expected_candidates
         report['core']=c.core_metadata(str(CORE))
         candidates,hops,inventory=load_inputs(); report['inventory']=inventory; save(report)
-        try:
-            report['cloud_egress']=egress(None)
-            cloud_ip=report['cloud_egress'][0]['ip']
-        except (ValueError,TypeError,RecursionError,KeyError,OSError,subprocess.SubprocessError,Unknown):
-            report['cloud_egress_error']='not-established'; cloud_ip=None
+        report['cloud_neutral_control']=cloud_control()
+        report['cloud_ip_service_controls'],cloud_ip=establish_egress_controls()
+        report['active_ip_services']=[x[0] for x in ACTIVE_EGRESS]
+        save(report)
+        if not report['cloud_neutral_control']['healthy'] or cloud_ip is None:
+            report['status']='probe-controls-not-established'
+            report['reason']='cloud-neutral-or-two-independent-ip-services-unavailable'
+            return report
+        report['cloud_egress_ip']=cloud_ip
         healthy=[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
             for record,out in pool.map(lambda item:validate_hop(item,cloud_ip),hops):
@@ -467,14 +549,14 @@ def run():
                     path=hop_record['id'] if hop_record else 'direct-cloud'
                     batch={'round':round_id+1,'path':path,'batch':offset//4,'started_at':c.utc_now()}
                     if hop:
-                        expected=hop_record['egress'][0]['ip']
-                        batch['control_before']=hop_control(hop,expected)
+                        expected_ip=hop_record['egress'][0]['ip']
+                        batch['control_before']=hop_control(hop,expected_ip)
                     else:
                         batch['control_before']=cloud_control()
                     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
                         batch['results']=list(pool.map(lambda item: assess(item,hop),items))
                     if hop:
-                        batch['control_after']=hop_control(hop,expected)
+                        batch['control_after']=hop_control(hop,expected_ip)
                     else:
                         batch['control_after']=cloud_control()
                     classify_batch(batch['results'],batch['control_before'],batch['control_after'])
@@ -493,6 +575,22 @@ def run():
         completed={(batch['round'],batch['path'],r['id']) for batch in report['batches'] for r in batch['results']}
         report['not_run']=[{**row,'state':'unknown','reason':report.get('reason','not-run')}
                            for row in report.get('planned_matrix',[]) if (row['round'],row['path'],row['id']) not in completed]
+        if not report.get('planned_matrix'):
+            report['not_run']=[{'id':item['id'],'group':item['group'],'path':'ru-detour-not-established','round':None,
+                                'state':'unknown','reason':report['status'],'scope':'candidate-blocked-before-matrix'} for item in expected_candidates]
+        else:
+            represented={row['id'] for row in report['planned_matrix']}
+            report['not_run'] += [{'id':item['id'],'group':item['group'],'path':'candidate-input-unavailable','round':None,
+                                  'state':'unknown','reason':'snapshot-config-unavailable','scope':'candidate-blocked-before-matrix'}
+                                 for item in expected_candidates if item['id'] not in represented]
+            if any(item['id'] not in represented for item in expected_candidates) and report['status']=='completed':
+                report['status']='incomplete';report['reason']='some-snapshot-configs-unavailable'
+        report['candidate_probe_attempts']=sum(len(x['results']) for x in report['batches'])
+        report['candidate_unique_tested']=len({x['id'] for batch in report['batches'] for x in batch['results']})
+        report['candidate_unique_not_tested']=len({x['id'] for x in report['not_run']}-{x['id'] for batch in report['batches'] for x in batch['results']})
+        report['cumulative_observed_bytes']=PREVIOUS_OBSERVED_BYTES+BUDGET.observed
+        report['cumulative_payload_upper_bound_bytes']=PREVIOUS_RESERVED_BYTES+BUDGET.reserved
+        report['cumulative_live_seconds']=PREVIOUS_LIVE_SECONDS+time.monotonic()-started_monotonic
         report['summary']=dict(collections.Counter([r['state'] for batch in report['batches'] for r in batch['results']]+
                                                    ['unknown']*len(report['not_run'])))
         save(report)

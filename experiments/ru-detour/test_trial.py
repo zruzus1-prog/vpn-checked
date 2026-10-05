@@ -120,6 +120,110 @@ class TrialTests(unittest.TestCase):
     def test_nonobject_json_is_unknown(self):
         with patch.object(t,'request',return_value=({'http_status':200},b'[]')):
             with self.assertRaises(t.Unknown):t.get_json('https://api.ipify.org')
+    def test_ip_formats_require_one_public_string_ip(self):
+        good={'http_status':200,'bytes':20,'curl_exit':0}
+        cases=[(('cloudflare','https://www.cloudflare.com/cdn-cgi/trace','trace'),b'ip=8.8.8.8\nloc=RU\n',True),
+               (('cloudflare','https://www.cloudflare.com/cdn-cgi/trace','trace'),b'ip=8.8.8.8\nip=1.1.1.1\n',False),
+               (('aws','https://checkip.amazonaws.com/','text'),b'8.8.8.8\n',True),
+               (('aws','https://checkip.amazonaws.com/','text'),b'8.8.8.8\n1.1.1.1',False),
+               (('aws','https://checkip.amazonaws.com/','text'),b'<html>8.8.8.8</html>',False),
+               (('ipify','https://api.ipify.org','json'),b'{"ip":134744072}',False),
+               (('ipify','https://api.ipify.org','json'),b'{"ip":"127.0.0.1"}',False),
+               (('ipify','https://api.ipify.org','json'),b'{"ip":"2606:4700::1111%eth0"}',False)]
+        for service,body,healthy in cases:
+            with patch.object(t,'request',return_value=(good,body)):
+                observation=t.ip_observation(service)
+            self.assertEqual(observation['healthy'],healthy)
+            self.assertNotIn('loc',observation)
+            self.assertNotIn('body',observation)
+    def test_two_independent_cloud_services_required(self):
+        bad={'healthy':False,'reason':'timeout'}
+        variants=[([bad,bad,bad,bad],None),
+                  ([{'healthy':True,'ip':'8.8.8.8'},bad,bad,bad],None),
+                  ([{'healthy':True,'ip':'8.8.8.8'},{'healthy':True,'ip':'1.1.1.1'},bad,bad],None),
+                  ([{'healthy':True,'ip':'8.8.8.8'},{'healthy':True,'ip':'8.8.8.8'},bad,bad],'8.8.8.8')]
+        for observations,expected in variants:
+            with patch.object(t,'ip_observation',side_effect=observations):
+                controls,cloud=t.establish_egress_controls()
+            self.assertEqual(cloud,expected)
+            self.assertEqual(len(t.ACTIVE_EGRESS),2 if expected else 0)
+    def test_neutral_hop_failure_prevents_ip_attribution(self):
+        import contextlib
+        with patch.object(t,'prepare_outbound',return_value=(SS,{})),\
+             patch.object(t,'core_session',return_value=contextlib.nullcontext((1,'temporary'))),\
+             patch.object(t,'request',return_value=({'http_status':0,'error':'timeout'},b'')),\
+             patch.object(t,'egress') as attribution:
+            record,out=t.validate_hop({'id':'synthetic','uri':'synthetic','source_indexes':[]})
+        self.assertIsNone(out);self.assertEqual(record['stage'],'neutral-https')
+        self.assertEqual(record['state'],'unknown');attribution.assert_not_called()
+    def test_failed_controls_explicitly_block_all24_without_proxy_attempt(self):
+        rows=json.loads((t.OUT/'selection.json').read_text())
+        candidates=[{**row,'uri':'synthetic'} for row in rows]
+        with patch.object(t.c,'core_metadata',return_value={}),\
+             patch.object(t,'load_inputs',return_value=(candidates,[],{})),\
+             patch.object(t,'cloud_control',return_value={'healthy':True}),\
+             patch.object(t,'establish_egress_controls',return_value=([],None)),\
+             patch.object(t,'save'),patch.object(t,'validate_hop') as hop,\
+             patch.object(t,'BUDGET',t.Budget()),patch.object(t,'ACTIVE_EGRESS',[]):
+            report=t.run()
+        self.assertEqual(report['status'],'probe-controls-not-established')
+        self.assertEqual(len(report['not_run']),24)
+        self.assertEqual(report['candidate_unique_not_tested'],24)
+        self.assertEqual(report['candidate_probe_attempts'],0);hop.assert_not_called()
+    def test_refund_only_measured_complete_requests(self):
+        budget=t.Budget(payload=20)
+        budget.claim(15);budget.observe(3,15)
+        self.assertEqual(budget.reserved,3)
+        budget.claim(15)
+        self.assertEqual(budget.reserved,18)
+        with self.assertRaises(t.Unknown):budget.claim(3)
+    def test_oversize_accounting_is_truthful_and_stops(self):
+        budget=t.Budget(payload=20);budget.claim(10);budget.observe(30,10)
+        self.assertEqual(budget.reserved,30);self.assertTrue(budget.exhausted)
+    def test_concurrent_reservations_and_refunds(self):
+        import concurrent.futures,threading
+        budget=t.Budget(payload=100);barrier=threading.Barrier(8)
+        def consume(_):
+            budget.claim(10);barrier.wait();budget.observe(2,10)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:list(pool.map(consume,range(8)))
+        self.assertEqual(budget.reserved,16);self.assertEqual(budget.observed,16)
+    def test_process_timeout_retains_full_reservation(self):
+        budget=t.Budget()
+        with patch.object(t,'BUDGET',budget),patch.object(t,'endpoint',return_value=('www.gstatic.com','8.8.8.8')),\
+             patch.object(t.subprocess,'run',side_effect=t.subprocess.TimeoutExpired('curl',1)):
+            with self.assertRaises(t.Unknown):t.request(t.NEUTRAL,limit=100)
+        self.assertEqual(budget.reserved,100);self.assertEqual(budget.observed,0)
+    def test_input_failure_still_blocks_frozen24(self):
+        with patch.object(t.c,'core_metadata',return_value={}),\
+             patch.object(t,'load_inputs',side_effect=t.Unknown('checked-snapshot-unavailable')),\
+             patch.object(t,'save'),patch.object(t,'BUDGET',t.Budget()):
+            report=t.run()
+        self.assertEqual(len(report['not_run']),24)
+        self.assertEqual(report['candidate_probe_attempts'],0)
+        self.assertEqual(report['candidate_unique_not_tested'],24)
+    def test_healthy_hop_matrix_finalization_keeps_expected_cohort(self):
+        rows=json.loads((t.OUT/'selection.json').read_text())
+        candidates=[{**row,'uri':'synthetic'} for row in rows]
+        record={'id':'synthetic-hop','state':'apparently-ru-healthy','asn':'AS1','egress':[{'ip':'8.8.4.4'}]}
+        def assessed(item,hop=None):return {'id':item['id'],'group':item['group'],'state':'passed'}
+        with patch.object(t.c,'core_metadata',return_value={}),\
+             patch.object(t,'load_inputs',return_value=(candidates,[{'id':'synthetic-hop'}],{})),\
+             patch.object(t,'cloud_control',return_value={'healthy':True}),\
+             patch.object(t,'establish_egress_controls',return_value=([],'1.1.1.1')),\
+             patch.object(t,'validate_hop',return_value=(record,SS)),\
+             patch.object(t,'hop_control',return_value={'healthy':True}),\
+             patch.object(t,'assess',side_effect=assessed),patch.object(t.time,'sleep'),\
+             patch.object(t,'save'),patch.object(t,'BUDGET',t.Budget()):
+            report=t.run()
+        self.assertEqual(report['status'],'completed')
+        self.assertEqual(report['candidate_probe_attempts'],96)
+        self.assertEqual(report['candidate_unique_tested'],24)
+        self.assertEqual(report['candidate_unique_not_tested'],0)
+        self.assertEqual(report['not_run'],[])
+    def test_repair_pool_and_cumulative_caps(self):
+        self.assertEqual(len(t.RECHECK_HOP_IDS),10)
+        self.assertEqual(t.PAYLOAD_LIMIT+t.PREVIOUS_RESERVED_BYTES,196*1024*1024)
+        self.assertLessEqual(t.TOTAL_SECONDS+t.PREVIOUS_LIVE_SECONDS,24*60)
     def test_selection_is_bounded_unique(self):
         path=t.OUT/'selection.json'
         if not path.exists():self.skipTest('selection pending')
