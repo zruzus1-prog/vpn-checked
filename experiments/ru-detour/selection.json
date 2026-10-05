@@ -1,0 +1,98 @@
+[
+  {
+    "id": "a57f52dcb1832a6e",
+    "group": "stable-local-negative"
+  },
+  {
+    "id": "1d46c8793687c3c6",
+    "group": "stable-local-negative"
+  },
+  {
+    "id": "19127b29476e9f16",
+    "group": "stable-local-negative"
+  },
+  {
+    "id": "b8480c592a445233",
+    "group": "stable-local-negative"
+  },
+  {
+    "id": "04a5c4d0a16de7a7",
+    "group": "stable-local-negative"
+  },
+  {
+    "id": "04caadd2ea7ee684",
+    "group": "stable-local-negative"
+  },
+  {
+    "id": "0bf9f8b407955d8e",
+    "group": "stable-local-negative"
+  },
+  {
+    "id": "2672a8095731f6b7",
+    "group": "stable-local-negative"
+  },
+  {
+    "id": "e606956b7e70d0d2",
+    "group": "prior-local-positive"
+  },
+  {
+    "id": "803d5ba766636b9c",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "f112f9db07333712",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "6fb7bfb5157a1e99",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "0cb07bc74ffc18b5",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "1a11743f95200ff9",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "d4f40ed0ccfecde2",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "80b85ca3a1b9b2a0",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "0dfa7bbd63d784ae",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "c16110bb60aaccf6",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "18a74e25d502f389",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "1d7aa928bd5c55dc",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "7e564e34ae819c65",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "be9df909f6606b49",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "3e04a518d9bc4937",
+    "group": "reserve-unconfirmed"
+  },
+  {
+    "id": "014c4b2884ab8fd4",
+    "group": "reserve-unconfirmed"
+  }
+]

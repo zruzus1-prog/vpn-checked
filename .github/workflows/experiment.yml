@@ -1,39 +1,38 @@
-name: Bounded public proxy experiment
+name: Isolated encrypted Russian-egress feasibility trial
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: bounded-public-proxy-experiment
+  group: isolated-ru-detour-feasibility
   cancel-in-progress: false
 jobs:
   experiment:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
-    defaults:
-      run:
-        working-directory: experiments/proxy-trial
     steps:
-      - name: Read repository without persistent credentials
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Read exact isolated branch without persistent credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Offline tests
-        run: python3 -m unittest -v test_trial
-      - name: Get allowlisted feeds and checksum-pinned official core
-        run: python3 prepare_inputs.py
-      - name: Two-round bounded feasibility sample
-        run: python3 trial.py run --vantage 'GitHub ubuntu-24.04 hosted runner; not Russia or the user network'
-      - name: Upload credential-free diagnostics only
+      - name: Offline fail-closed tests
+        run: python3 -m unittest discover -s experiments/ru-detour -v
+      - name: Install SHA-pinned official sing-box
+        run: python3 fetch_core.py
+      - name: Mandatory pinned-core baseline and no-fallback runtime smoke
+        env:
+          RUN_CORE_SMOKE: '1'
+        run: python3 -m unittest discover -s experiments/ru-detour -v
+      - name: Bounded encrypted TCP trial, no feed publication
+        run: python3 experiments/ru-detour/trial.py
+      - name: Upload credential-free result only
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: bounded-proxy-experiment-diagnostics
-          path: |
-            experiments/proxy-trial/inventory.json
-            experiments/proxy-trial/results.json
-            experiments/proxy-trial/core-verification.json
+          name: ru-detour-diagnostics
+          path: experiments/ru-detour/results.json
           if-no-files-found: warn
           retention-days: 3
