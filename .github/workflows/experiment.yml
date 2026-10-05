@@ -1,39 +1,124 @@
-name: Bounded public proxy experiment
+name: Isolated Radikal source trial
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: bounded-public-proxy-experiment
+  group: isolated-radikal-trial
   cancel-in-progress: false
 jobs:
-  experiment:
+  prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: experiments/proxy-trial
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.freeze.outputs.matrix }}
+      manifest_sha256: ${{ steps.freeze.outputs.manifest_sha256 }}
+      comparison_sha256: ${{ steps.freeze.outputs.comparison_sha256 }}
     steps:
-      - name: Read repository without persistent credentials
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Offline tests
-        run: python3 -m unittest -v test_trial
-      - name: Get allowlisted feeds and checksum-pinned official core
-        run: python3 prepare_inputs.py
-      - name: Two-round bounded feasibility sample
-        run: python3 trial.py run --vantage 'GitHub ubuntu-24.04 hosted runner; not Russia or the user network'
-      - name: Upload credential-free diagnostics only
+      - name: Offline production and experiment tests
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m unittest discover -s experiments/radikal-trial/tests -v
+      - name: Read at most four checked-branch observations
+        run: git fetch --no-tags --depth=4 origin refs/heads/checked
+      - name: Freeze whole Radikal pool and independent comparison snapshots
+        id: freeze
+        run: |
+          python3 experiments/radikal-trial/trial.py prepare \
+            --frozen /tmp/radikal-frozen \
+            --history-head "$(git rev-parse FETCH_HEAD)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bounded-proxy-experiment-diagnostics
-          path: |
-            experiments/proxy-trial/inventory.json
-            experiments/proxy-trial/results.json
-            experiments/proxy-trial/core-verification.json
-          if-no-files-found: warn
-          retention-days: 3
+          name: radikal-frozen
+          path: /tmp/radikal-frozen/
+          if-no-files-found: error
+          retention-days: 1
+  shard:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: radikal-frozen
+          path: /tmp/radikal-frozen
+      - name: Verify both prepare-stage snapshot digests
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare.outputs.manifest_sha256 }}
+          EXPECTED_COMPARISON_SHA256: ${{ needs.prepare.outputs.comparison_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(cat /tmp/radikal-frozen/manifest.sha256)" = "$EXPECTED_MANIFEST_SHA256"
+          test "$(cat /tmp/radikal-frozen/comparison.sha256)" = "$EXPECTED_COMPARISON_SHA256"
+          echo "$EXPECTED_MANIFEST_SHA256  /tmp/radikal-frozen/manifest.json" | sha256sum --check --status
+          echo "$EXPECTED_COMPARISON_SHA256  /tmp/radikal-frozen/comparison.json" | sha256sum --check --status
+      - name: Install checksum-pinned official production core
+        run: python3 fetch_core.py
+      - name: Offline parser conformance against pinned core
+        run: SING_BOX_TEST_BIN="$PWD/bin/sing-box" python3 -m unittest discover -s tests -p test_parser_compat.py -v
+      - name: Unchanged strict production checks for every frozen candidate
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+        run: |
+          python3 experiments/radikal-trial/trial.py shard \
+            --frozen /tmp/radikal-frozen --shard "$SHARD_ID" --output /tmp/radikal-shards
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: radikal-shard-${{ matrix.shard }}
+          path: /tmp/radikal-shards/
+          if-no-files-found: error
+          retention-days: 1
+  merge:
+    needs: [prepare, shard]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: radikal-frozen
+          path: /tmp/radikal-frozen
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: radikal-shard-*
+          path: /tmp/radikal-shards
+          merge-multiple: true
+      - name: Verify both prepare-stage snapshot digests
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.prepare.outputs.manifest_sha256 }}
+          EXPECTED_COMPARISON_SHA256: ${{ needs.prepare.outputs.comparison_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(cat /tmp/radikal-frozen/manifest.sha256)" = "$EXPECTED_MANIFEST_SHA256"
+          test "$(cat /tmp/radikal-frozen/comparison.sha256)" = "$EXPECTED_COMPARISON_SHA256"
+          echo "$EXPECTED_MANIFEST_SHA256  /tmp/radikal-frozen/manifest.json" | sha256sum --check --status
+          echo "$EXPECTED_COMPARISON_SHA256  /tmp/radikal-frozen/comparison.json" | sha256sum --check --status
+      - name: Validate complete fresh coverage and report conservative incremental yield
+        run: |
+          python3 experiments/radikal-trial/trial.py merge \
+            --frozen /tmp/radikal-frozen --shards /tmp/radikal-shards --output /tmp/radikal-output
+          cp experiments/radikal-trial/README.md /tmp/radikal-output/TRIAL-NOTICE.md
+          cp experiments/radikal-trial/UPSTREAM-LICENSE.txt /tmp/radikal-output/RADIKAL-LICENSE.txt
+          cp LICENSE /tmp/radikal-output/CHECKER-LICENSE.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: radikal-trial-output
+          path: /tmp/radikal-output/
+          if-no-files-found: error
+          retention-days: 1
