@@ -14,7 +14,8 @@ class RolloverTests(unittest.TestCase):
     setUp = fixtures.PipelineTests.setUp
     run_shards = fixtures.PipelineTests.run_shards
 
-    def publications(self, *, passed=True, reappear=True):
+    def publications(self, *, passed=True, reappear=True,
+                     hours=(50, 40, 30, 20, 10, 3), current_indexes=None, replay_seed=False):
         """Generate real publisher artifacts across two rolling-window seed expirations."""
         import validate_output as v
         class Clock(datetime):
@@ -27,14 +28,17 @@ class RolloverTests(unittest.TestCase):
         commits = []
         remote = {}
         api = 'https://api.github.com/repos/owner/repo'
-        for index, hours in enumerate((50, 40, 30, 20, 10, 3)):
-            fixtures.TEST_CLOCK[0] = actual_now - timedelta(hours=hours)
+        for index, age in enumerate(hours):
+            fixtures.TEST_CLOCK[0] = actual_now - timedelta(hours=age)
             if state is None:
                 state = h.empty(fixtures.TEST_CLOCK[0].isoformat())
             provenance = {'checked_commit': previous_sha,
-                          'authenticated_snapshots': index,
+                          'authenticated_snapshots': len(h.prune(state, fixtures.TEST_CLOCK[0])['runs']),
                           'mode': 'retained-state' if index else 'expired-history'}
-            present = index in (0, 2) or (reappear and index == 4)
+            if replay_seed and index:
+                self.commit_pages(remote, api, commits)
+                state = self.replay(remote, fixtures.TEST_CLOCK[0])
+            present = index in current_indexes if current_indexes is not None else (index in (0, 2) or (reappear and index == 4))
             def probe(value, core, deadline, budget):
                 if not passed and index in (1, 3) and c.node_id(value) == c.node_id(fixtures.uri(1)):
                     return fixtures.failed_probe(value, core, deadline, budget)
@@ -50,7 +54,7 @@ class RolloverTests(unittest.TestCase):
             report = json.loads((self.output / 'report.json').read_bytes())
             state = json.loads((self.output / 'history.json').read_bytes())
             done = p.instant(report['completed_at'])
-            sha = str(index + 1) * 40
+            sha = f'{index + 1:040x}'
             commit = {'sha': sha, 'parents': [{'sha': previous_sha}], 'commit': {
                 'committer': {'name': 'github-actions[bot]',
                               'email': '41898282+github-actions[bot]@users.noreply.github.com',
@@ -72,10 +76,33 @@ class RolloverTests(unittest.TestCase):
                                          'completed_at': run['updated_at']}]})
             previous_sha = sha
             commits.append(commit)
-        commits = list(reversed(commits)) + [{'sha': 'f' * 40, 'commit': {'committer': {
-            'date': (actual_now - timedelta(hours=99)).isoformat()}}}]
-        remote[api + '/commits?sha=checked&per_page=32'] = h.encoded(commits)
+        self.commit_pages(remote, api, commits)
         return actual_now, remote, 'https://raw.githubusercontent.com/owner/repo/' + previous_sha + '/'
+
+    def commit_pages(self, remote, api, commits):
+        newest_first = list(reversed(commits))
+        remote[api + '/commits?sha=checked&per_page=32'] = h.encoded(newest_first[:32])
+        remote[api + '/commits?sha=checked&per_page=32&page=2'] = h.encoded(newest_first[32:64])
+
+    def test_expired_epoch_reappearance_survives_generation_and_next_replay(self):
+        now, remote, root = self.publications(hours=(78, 70, 46, 40, 35, 1),
+                                              current_indexes={0, 5}, replay_seed=True)
+        published = h.strict_json(remote[root + 'history.json'])
+        entry = next(e for e in published['entries'] if e['id'] == c.node_id(fixtures.uri(1)))
+        self.assertEqual([o['run_id'] for o in entry['observations']], ['105'])
+        for hours in (0, 1, 8, 8.000001, 47, 47.000001, 49, 100):
+            at = now + timedelta(hours=hours)
+            self.assertEqual(self.replay(remote, at), h.prune(published, at))
+
+    def test_week_of_two_hour_publications_with_chained_expiry_and_reappearance(self):
+        # A one-second cron drift avoids deliberately expiring a nomination
+        # between prepare and publish (covered by its own fail-closed test).
+        now, remote, root = self.publications(hours=tuple(age-index/3600 for index, age in enumerate(range(170, -1, -2))),
+                                              current_indexes={0, 10, 45, 70, 80}, replay_seed=True)
+        published = h.strict_json(remote[root + 'history.json'])
+        for hours in (1, 24, 28, 28.000001, 48, 48.000001, 96):
+            at = now + timedelta(hours=hours)
+            self.assertEqual(self.replay(remote, at), h.prune(published, at))
 
     def replay(self, remote, now):
         def read(url, maximum, token=None):
@@ -158,7 +185,8 @@ class RolloverTests(unittest.TestCase):
         import test_history as histories
         for implementation in ('8601c067ce2f7dde936b17808b7bf58906131d19',
                                '976c84b3a09bb8a7decc1c623726f28749720986',
-                               '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484', '9' * 40):
+                               '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484',
+                               '4a398dfbc1fae8da90eae755dcda8661871a1cd0', '9' * 40):
             report, commit, run, jobs = histories.AuthenticationTests().fixtures()
             report['production']['implementation_sha'] = run['head_sha'] = implementation
             with patch('history.remote_read', side_effect=[h.encoded(run), h.encoded(jobs)]):
@@ -168,6 +196,29 @@ class RolloverTests(unittest.TestCase):
                 else:
                     self.assertEqual(h.authenticate_publication('owner/repo', commit, report, None,
                                                                now=histories.NOW), 'schedule')
+
+    def test_later_overlapping_source_fetch_is_not_a_prior_anchor(self):
+        now = datetime(2026, 10, 7, 12, tzinfo=timezone.utc)
+        row = {'id': 'a' * 16, 'sources': [c.SOURCES[0]]}
+        earlier = {'run': {'snapshot_at': (now-timedelta(hours=2)).isoformat()},
+                   'rows': [row], 'current_ids': set(), 'source_times': {}}
+        later = {'run': {'snapshot_at': (now-timedelta(hours=1)).isoformat()},
+                 'rows': [row], 'current_ids': {row['id']},
+                 'source_times': {c.SOURCES[0]: (now-timedelta(hours=3)).isoformat()}}
+        self.assertFalse(h.source_anchors_complete([later, earlier], now))
+
+    def test_anchor_budget_counts_old_reports_even_on_first_metadata_page(self):
+        now, remote, _ = self.publications()
+        # The oldest source seed is on page one, but is proof-only at this time.
+        with patch.object(h, 'MAX_ANCHOR_RUNS', 0), self.assertRaises(ValueError):
+            self.replay(remote, now)
+
+    def test_proof_only_pagination_is_bounded(self):
+        now = datetime(2026, 10, 7, 12, tzinfo=timezone.utc)
+        commit = {'sha': 'a' * 40, 'commit': {'committer': {'date': now.isoformat()}}}
+        with patch('history.remote_read', side_effect=[h.encoded([commit] * h.MAX_RUNS),
+                   h.encoded([commit] * (h.MAX_ANCHOR_RUNS + 1))]), self.assertRaises(ValueError):
+            h.load_remote('owner/repo', None, now=now)
 
     def test_authenticated_replay_resource_limits_remain_enforced(self):
         now, remote, root = self.publications()

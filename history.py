@@ -23,7 +23,8 @@ SCHEMA = 1
 MEASUREMENT_PROFILE = 'sing-box-1.14.2-v2/https204-stability45-2x2MiB-256KiBs-youtube-html-v1'
 BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
                              '976c84b3a09bb8a7decc1c623726f28749720986',
-                             '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484'}
+                             '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484',
+                             '4a398dfbc1fae8da90eae755dcda8661871a1cd0'}
 LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Captured allowlists, not a source list supplied by a historical report.
 CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
@@ -31,6 +32,7 @@ LEGACY_SOURCE_INVENTORY = CURRENT_SOURCE_INVENTORY[:-1]
 MAX_AGE_SECONDS = 48 * 3600
 MAX_BYTES = 12 * 1024 * 1024
 MAX_RUNS = 32
+MAX_ANCHOR_RUNS = 32  # Separate proof-only budget; never extends scored history.
 MAX_ENTRIES = 8192  # Metadata churn budget, separate from live 2048-node probe cap
 MAX_URI_BYTES = 16384
 STABLE_CAP = 40
@@ -425,6 +427,25 @@ def archived_source_inventory(report):
         c.SOURCES, output_validator.SOURCES = previous
 
 
+def source_anchors_complete(snapshots, now):
+    """Prove the seed for each earliest retained observation, without claims."""
+    first = {}
+    for snapshot in reversed(snapshots):
+        at = stamp(snapshot['run']['snapshot_at'])
+        if (now-at).total_seconds() <= MAX_AGE_SECONDS:
+            for row in snapshot['rows']:
+                first.setdefault(row['id'], (at, row['id'] in snapshot['current_ids']))
+    needed = {rid: at for rid, (at, current) in first.items() if not current}
+    for snapshot in snapshots:
+        for row in snapshot['rows']:
+            rid = row['id']
+            if rid in needed and rid in snapshot['current_ids'] and stamp(snapshot['run']['snapshot_at']) <= needed[rid]:
+                seen = stamp(max(snapshot['source_times'][u] for u in row['sources']))
+                if 0 <= (needed[rid]-seen).total_seconds() <= MAX_AGE_SECONDS:
+                    del needed[rid]
+    return not needed
+
+
 def load_remote(repo, token, *, now=None):
     """Rebuild history from bounded authenticated publications, never aggregates.
 
@@ -442,7 +463,17 @@ def load_remote(repo, token, *, now=None):
         if exc.code != 404: raise
         return empty(now.isoformat()), {'checked_commit': None, 'authenticated_snapshots': 0, 'mode': 'cold-start'}
     need(isinstance(commits, list) and len(commits) <= MAX_RUNS)
+    # A two-hour schedule needs up to 49 snapshots to prove a full 96-hour
+    # anchor horizon. Keep the live 32-run cap and bound proof-only pagination.
+    if len(commits) == MAX_RUNS and (now-stamp(commits[-1]['commit']['committer']['date'])).total_seconds() <= 2 * MAX_AGE_SECONDS:
+        anchors = strict_json(remote_read(base+'/commits?sha=checked&per_page=32&page=2', 8*1024*1024, token))
+        need(isinstance(anchors, list) and len(anchors) <= MAX_ANCHOR_RUNS)
+        commits += anchors
     snapshots = []
+    live_snapshots = anchor_snapshots = 0
+    # One additional window supplies direct source-presence anchors for the
+    # oldest retained measurements. Anchors never survive into output history.
+    anchor_seconds = 2 * MAX_AGE_SECONDS
     newest = commits[0]['sha'] if commits else None
     latest_claim = None
     previous_commit = None
@@ -450,7 +481,9 @@ def load_remote(repo, token, *, now=None):
     for commit in commits:
         committed = stamp(commit['commit']['committer']['date'])
         need(committed <= now)
-        if (now-committed).total_seconds() > MAX_AGE_SECONDS:
+        if (now-committed).total_seconds() > MAX_AGE_SECONDS and source_anchors_complete(snapshots, now):
+            break
+        if (now-committed).total_seconds() > anchor_seconds:
             break
         sha = commit['sha']; need(re.fullmatch('[0-9a-f]{40}', sha))
         if previous_commit is not None:
@@ -460,12 +493,22 @@ def load_remote(repo, token, *, now=None):
         root_url = 'https://raw.githubusercontent.com/' + repo + '/' + sha + '/'
         report_data = remote_read(root_url+'report.json', 32_000_000)
         report = strict_json(report_data)
-        if (now-stamp(report['started_at'])).total_seconds() > MAX_AGE_SECONDS:
+        if not snapshots and (now-stamp(report['started_at'])).total_seconds() > MAX_AGE_SECONDS:
+            break
+        if (now-stamp(report['started_at'])).total_seconds() > anchor_seconds:
             break
         if report.get('schema_version') != 4 or report.get('identity_version') != c.CANONICALIZATION_VERSION:
             # Older formats cannot prove a compatible measurement history.
             break
-        event = authenticate_publication(repo, commit, report, token, now=now)
+        if (now-stamp(report['started_at'])).total_seconds() > MAX_AGE_SECONDS:
+            anchor_snapshots += 1
+            need(anchor_snapshots <= MAX_ANCHOR_RUNS)
+        else:
+            live_snapshots += 1
+            need(live_snapshots <= MAX_RUNS)
+        # Commit time is an authenticated historical horizon, not a relaxed
+        # measurement window. The outer loop separately bounds anchor age.
+        event = authenticate_publication(repo, commit, report, token, now=committed)
         meta = report['production']
         need(meta['run_id'] not in seen_runs)
         seen_runs.add(meta['run_id'])
@@ -487,7 +530,7 @@ def load_remote(repo, token, *, now=None):
             with archived_source_inventory(report):
                 validate_output(root, as_of=stamp(report['completed_at']), allow_legacy_split=True)
             exports = {c.node_id(uri): uri for uri in (root/c.FEEDS['youtube']).read_text().splitlines()}
-            # Retain only compact replay facts, not 32 full attempt-heavy reports.
+            # Retain only bounded compact facts, never all full attempt-heavy reports.
             rows = [{'id': row['id'], 'sources': row['sources'], 'original_uri_sha256': row['original_uri_sha256'], 'youtube': row['service_qualified']['youtube'],
                      'min_kib_s': measured_min_speed(row) if row['service_qualified']['youtube'] else None,
                      'median_ms': row.get('median_ms') if row['service_qualified']['youtube'] else None,
@@ -499,24 +542,33 @@ def load_remote(repo, token, *, now=None):
                               'current_ids': set(report.get('history', {}).get('current_ids', [row['id'] for row in rows])),
                               'source_times': {source['url']: source['fetched_at'] for source in report['sources']}})
         del report, report_data
-    if len(commits) == MAX_RUNS:
-        need((now-stamp(commits[-1]['commit']['committer']['date'])).total_seconds() > MAX_AGE_SECONDS)
-    # Establish nomination eligibility over the whole authenticated window first.
-    # A retained-only observation may precede a later upstream reappearance:
-    # dropping it during chronological replay would silently lose real evidence.
-    # Retests still cannot refresh source presence or revive expired-only IDs.
-    eligible_ids = {row['id'] for snapshot in snapshots for row in snapshot['rows']
-                    if row['id'] in snapshot['current_ids'] and
-                    (now-stamp(max(snapshot['source_times'][u] for u in row['sources']))).total_seconds() <= MAX_AGE_SECONDS}
-    need(len(eligible_ids) <= MAX_ENTRIES)
+    if len(commits) == MAX_RUNS + MAX_ANCHOR_RUNS:
+        need(source_anchors_complete(snapshots, now))
     runs, entries, original_hashes = [], {}, {}
     for snapshot in reversed(snapshots):
-        run = snapshot['run']; runs.append(run)
+        run = snapshot['run']
+        at = stamp(run['snapshot_at'])
+        runs = [r for r in runs if (at-stamp(r['snapshot_at'])).total_seconds() <= MAX_AGE_SECONDS]
+        retained_runs = {r['run_id'] for r in runs}
+        # Match update(): prune before the new source snapshot can refresh an
+        # identity. A true source-expiry gap starts a new nomination epoch.
+        entries = {rid: {**entry, 'observations': [o for o in entry['observations'] if o['run_id'] in retained_runs]}
+                   for rid, entry in entries.items()
+                   if (at-stamp(entry['last_upstream_seen_at'])).total_seconds() <= MAX_AGE_SECONDS}
+        entries = {rid: entry for rid, entry in entries.items() if entry['observations']}
+        for entry in entries.values():
+            if not any(o['youtube'] for o in entry['observations']):
+                entry['uri'] = None
+        runs.append(run)
         for row in snapshot['rows']:
             rid = row['id']
             original_hashes[rid] = row['original_uri_sha256']
             is_current = rid in snapshot['current_ids']
-            if rid not in eligible_ids:
+            if rid not in entries and not is_current:
+                # Only the older anchor prefix may lack its own earlier seed.
+                # Every retained in-window observation needs a direct source
+                # appearance proven by an independently authenticated report.
+                need((now-at).total_seconds() > MAX_AGE_SECONDS)
                 continue
             entry = entries.setdefault(rid, {'id': rid, 'uri': None, 'sources': row['sources'], 'observations': []})
             if is_current:
@@ -525,20 +577,20 @@ def load_remote(repo, token, *, now=None):
             if row['youtube']:
                 entry['uri'] = snapshot['exports'][rid]
             entry['observations'].append({'run_id': run['run_id'], **{key:row[key] for key in OBS_KEYS-{'run_id'}}})
-    # The rolling window can exclude a source appearance just outside the first
-    # observed run. Such candidates are expired, not revived by later retests.
-    entries = {rid:entry for rid,entry in entries.items()
-               if (now-stamp(entry['last_upstream_seen_at'])).total_seconds() <= MAX_AGE_SECONDS}
+        need(len(entries) <= MAX_ENTRIES)
     state = {'schema_version': SCHEMA, 'measurement_profile': MEASUREMENT_PROFILE,
-             'identity_version': c.CANONICALIZATION_VERSION, 'created_at': now.isoformat(),
+             'identity_version': c.CANONICALIZATION_VERSION,
+             'created_at': runs[-1]['snapshot_at'] if runs else now.isoformat(),
              'runs': runs, 'entries': [entries[rid] for rid in sorted(entries)]}
-    validate(state, now=now)
+    state = prune(state, now)
+    runs = state['runs']
     if latest_claim is not None:
         # Compare all claimed observations and source timestamps to independent
         # replay. Unknown claimed runs or conflicting facts fail closed. URI
         # fragments may differ because old public exports already carry a label.
         need(latest_claim['runs'] == runs)
         by_id = {entry['id']: entry for entry in state['entries']}
+        need({entry['id'] for entry in latest_claim['entries']} == set(by_id))
         for claim in latest_claim['entries']:
             actual = by_id.get(claim['id'])
             need(actual is not None and claim['observations'] == actual['observations'] and
@@ -548,5 +600,5 @@ def load_remote(repo, token, *, now=None):
                      hashlib.sha256(claim['uri'].encode()).hexdigest() == original_hashes[claim['id']]))
                 # Preserve original retained fragment only after facts match.
                 actual['uri'] = claim['uri']
-    return state, {'checked_commit': newest, 'authenticated_snapshots': len(snapshots),
-                   'mode': 'retained-state' if latest_claim is not None else 'verified-bootstrap' if snapshots else 'expired-history'}
+    return state, {'checked_commit': newest, 'authenticated_snapshots': len(runs),
+                   'mode': 'retained-state' if latest_claim is not None else 'verified-bootstrap' if runs else 'expired-history'}
