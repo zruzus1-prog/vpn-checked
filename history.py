@@ -22,7 +22,8 @@ import diversity as d
 SCHEMA = 1
 MEASUREMENT_PROFILE = 'sing-box-1.14.2-v2/https204-stability45-2x2MiB-256KiBs-youtube-html-v1'
 BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
-                             '976c84b3a09bb8a7decc1c623726f28749720986'}
+                             '976c84b3a09bb8a7decc1c623726f28749720986',
+                             '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484'}
 LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Captured allowlists, not a source list supplied by a historical report.
 CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
@@ -500,6 +501,14 @@ def load_remote(repo, token, *, now=None):
         del report, report_data
     if len(commits) == MAX_RUNS:
         need((now-stamp(commits[-1]['commit']['committer']['date'])).total_seconds() > MAX_AGE_SECONDS)
+    # Establish nomination eligibility over the whole authenticated window first.
+    # A retained-only observation may precede a later upstream reappearance:
+    # dropping it during chronological replay would silently lose real evidence.
+    # Retests still cannot refresh source presence or revive expired-only IDs.
+    eligible_ids = {row['id'] for snapshot in snapshots for row in snapshot['rows']
+                    if row['id'] in snapshot['current_ids'] and
+                    (now-stamp(max(snapshot['source_times'][u] for u in row['sources']))).total_seconds() <= MAX_AGE_SECONDS}
+    need(len(eligible_ids) <= MAX_ENTRIES)
     runs, entries, original_hashes = [], {}, {}
     for snapshot in reversed(snapshots):
         run = snapshot['run']; runs.append(run)
@@ -507,9 +516,7 @@ def load_remote(repo, token, *, now=None):
             rid = row['id']
             original_hashes[rid] = row['original_uri_sha256']
             is_current = rid in snapshot['current_ids']
-            if rid not in entries and not is_current:
-                # Its true upstream appearance predates the retained window; a
-                # retest cannot recreate or extend the expired source presence.
+            if rid not in eligible_ids:
                 continue
             entry = entries.setdefault(rid, {'id': rid, 'uri': None, 'sources': row['sources'], 'observations': []})
             if is_current:
