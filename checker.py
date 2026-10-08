@@ -31,7 +31,7 @@ SOURCES = [
  'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt',
  'https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/secure/configs.txt',
 ]
-MAX_CANDIDATES = 2048
+MAX_CANDIDATES = 4096
 WORKERS = 4
 BUDGET = 90 * 60
 MAX_DEEP = MAX_CANDIDATES

@@ -28,7 +28,7 @@ MAX_PARALLEL = 8
 SHARD_SECONDS = 60 * 60
 MAX_MANIFEST_BYTES = 24 * 1024 * 1024
 MAX_SHARD_BYTES = 4 * 1024 * 1024
-MAX_REPORT_BYTES = 32_000_000
+MAX_REPORT_BYTES = 64_000_000
 CORE_LOCK = Path(__file__).with_name('core-lock.json')
 STAT_KEYS = {'raw_lines', 'raw_unique_lines', 'supported_lines', 'unique_candidates',
              'unique_endpoints', 'duplicate_supported_lines',
@@ -308,14 +308,20 @@ def load_manifest(path, digest_path=None):
 
 def prepare(path, *, use_history=False):
     normalized, provenance, sources, stats = c.collect_candidates()
-    # Keep source failures distinct from failed node probes; this contains no URI.
-    write_json(Path(path).parent / 'prepare-summary.json',
-               {'prepared_at': now_iso(), 'sources': sources, 'stats': stats}, MAX_MANIFEST_BYTES)
+    # Count-only overflow diagnostics never include candidate URIs or secrets.
+    summary = {'prepared_at': now_iso(), 'sources': sources, 'stats': stats,
+               'capacity': {'limit': c.MAX_CANDIDATES, 'current': len(normalized),
+                            'retained': None, 'total': None, 'status': 'sources-collected'}}
+    summary_path = Path(path).parent / 'prepare-summary.json'
+    write_json(summary_path, summary, MAX_MANIFEST_BYTES)
+    if len(normalized) > c.MAX_CANDIDATES:
+        summary['capacity']['status'] = 'current-overflow'
+        write_json(summary_path, summary, MAX_MANIFEST_BYTES)
+        raise PipelineError(f'candidate capacity exceeded: current={len(normalized)}, cap={c.MAX_CANDIDATES}; no truncation or publication')
     print(json.dumps({'sources_available': sum(s.get('downloaded') is True for s in sources),
                       'sources_expected': len(c.SOURCES), 'supported_candidates': len(normalized)}))
     require(len(sources) == len(c.SOURCES) and all(s.get('downloaded') is True for s in sources),
             'one or more sources unavailable; do not publish')
-    integer(len(normalized), c.MAX_CANDIDATES)
     implementation, run_id, attempt = runtime_identity()
     lock, lock_digest = local_lock()
     candidates = sorted(({'id': c.node_id(uri), 'uri': uri, 'sources': provenance[key]}
@@ -327,7 +333,16 @@ def prepare(path, *, use_history=False):
     else:
         state, provenance_info = h.empty(created_at), {'checked_commit': None, 'authenticated_snapshots': 0, 'mode': 'local-empty'}
     current_ids = [row['id'] for row in candidates]
-    candidates, state = h.nominate(state, candidates, created_at)
+    try:
+        candidates, state = h.nominate(state, candidates, created_at)
+    except h.CapacityError as exc:
+        summary['capacity'].update(retained=exc.retained, total=exc.current+exc.retained,
+                                   status='combined-overflow')
+        write_json(summary_path, summary, MAX_MANIFEST_BYTES)
+        raise PipelineError(str(exc)) from None
+    summary['capacity'].update(retained=len(candidates)-len(current_ids), total=len(candidates),
+                               status='within-limit')
+    write_json(summary_path, summary, MAX_MANIFEST_BYTES)
     integer(len(candidates), c.MAX_CANDIDATES, 1)
     history_info = {'state': state, 'provenance': provenance_info, 'current_ids': current_ids,
                     'event': os.environ.get('GITHUB_EVENT_NAME', 'local')}

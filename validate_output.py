@@ -247,7 +247,7 @@ def validate(root, *, as_of=None, allow_legacy_split=False):
     now=as_of or datetime.now(timezone.utc)
     from history import strict_json
     report_path=root/'report.json'
-    if report_path.is_symlink() or not report_path.is_file() or report_path.stat().st_size>32_000_000:
+    if report_path.is_symlink() or not report_path.is_file() or report_path.stat().st_size>64_000_000:
         raise ValueError('invalid report file')
     report=strict_json(report_path.read_bytes())
     extra_files=set()
@@ -257,7 +257,7 @@ def validate(root, *, as_of=None, allow_legacy_split=False):
     if {p.name for p in root.iterdir()} != {*FEEDS.values(), 'report.json'}|extra_files:
         raise ValueError('unexpected output files')
     for p in root.iterdir():
-        if p.is_symlink() or not p.is_file() or p.stat().st_size > (32_000_000 if p.name=='report.json' else 12*1024*1024 if p.name=='history.json' else 4_000_000):
+        if p.is_symlink() or not p.is_file() or p.stat().st_size > (64_000_000 if p.name=='report.json' else 12*1024*1024 if p.name=='history.json' else 4_000_000):
             raise ValueError('invalid output file')
     allowed={'schema_version','started_at','completed_at','vantage','probe_origin','identity_version',
         'identity_scope','core','sources','raw_lines','raw_unique_lines','supported_lines','unique_candidates',

@@ -25,38 +25,38 @@ class DiversityTests(unittest.TestCase):
     def assert_caps(self, candidates, selected):
         by_id = {x['id']: x for x in candidates}
         rows = [by_id[rid] for rid in selected]
-        self.assertLessEqual(len(selected), 40)
+        self.assertLessEqual(len(selected), 80)
         self.assertEqual(len({x['prefix'] for x in rows}), len(rows))
-        self.assertLessEqual(sum(x['tier'] != 'strict-history' for x in rows), 10)
-        for key, cap in [('protocol',20), ('group',12)]:
+        self.assertLessEqual(sum(x['tier'] != 'strict-history' for x in rows), 20)
+        for key, cap in [('protocol',40), ('group',24)]:
             self.assertTrue(all(n <= cap for n in Counter(x[key] for x in rows).values()))
         owners = Counter(o.lower() for x in rows for o in set(x['owners']))
-        self.assertTrue(all(n <= 20 for n in owners.values()))
+        self.assertTrue(all(n <= 40 for n in owners.values()))
 
-    def test_zero_one_39_40_41_and_small_cohort(self):
-        for n in (0, 1, 3, 39, 40, 41):
+    def test_zero_and_40_and_80_boundaries(self):
+        for n in (0, 1, 3, 39, 40, 41, 79, 80, 81):
             pool = [item(i) for i in range(n)]
             chosen, summary, decisions = d.select(pool)
-            self.assertEqual(len(chosen), min(n,40))
+            self.assertEqual(len(chosen), min(n,80))
             self.assertEqual(set(decisions), {x['id'] for x in pool})
             self.assert_caps(pool, chosen)
 
-    def test_single_group_cannot_force_forty(self):
+    def test_single_group_cannot_force_eighty(self):
         pool = [item(i, protocol='ss') for i in range(100)]
         chosen, _, _ = d.select(pool)
-        self.assertEqual(len(chosen), 12)
+        self.assertEqual(len(chosen), 24)
 
     def test_many_transports_cannot_bypass_protocol_cap(self):
         pool = [item(i, protocol='vless', group='vless/transport'+str(i%8)+'/tls/plain') for i in range(100)]
         chosen, _, _ = d.select(pool)
-        self.assertEqual(len(chosen), 20)
+        self.assertEqual(len(chosen), 40)
 
     def test_all_source_owners_count_and_duplicate_aliases_do_not_game_quota(self):
         pool = [item(i, owners=('shared', 'Shared', 'other'+str(i%5))) for i in range(70)]
         chosen, summary, _ = d.select(pool)
-        self.assertEqual(len(chosen), 20)
-        self.assertEqual(summary['source_owner_counts']['shared'], 20)
-        self.assertEqual(sum(summary['source_owner_counts'].values()), 40)
+        self.assertEqual(len(chosen), 40)
+        self.assertEqual(summary['source_owner_counts']['shared'], 40)
+        self.assertEqual(sum(summary['source_owner_counts'].values()), 80)
 
     def test_same_owner_multiple_feeds_collapse_honestly(self):
         sources = ['https://raw.githubusercontent.com/Owner/repo/main/one',
@@ -81,19 +81,19 @@ class DiversityTests(unittest.TestCase):
             with self.subTest(prefix=prefix),self.assertRaises(ValueError):d.select([item(1,prefix=prefix)])
         with self.assertRaises(ValueError):d.select([item(1),item(1)])
 
-    def test_exploration_is_bounded_at_ten_and_not_thirty_or_forty(self):
+    def test_exploration_is_bounded_at_twenty(self):
         pool=[item(i,tier='fresh-diversity') for i in range(100)]
         chosen,summary,_=d.select(pool)
-        self.assertEqual(len(chosen),10)
-        self.assertEqual(summary['selected_tier_counts']['fresh-diversity'],10)
+        self.assertEqual(len(chosen),20)
+        self.assertEqual(summary['selected_tier_counts']['fresh-diversity'],20)
         self.assertEqual(d.select(pool,exploratory_cap=0)[0],[])
-        with self.assertRaises(ValueError):d.select(pool,exploratory_cap=11)
+        with self.assertRaises(ValueError):d.select(pool,exploratory_cap=21)
 
-    def test_repeated_baseline_and_fresh_trials_share_same_ten_slot_budget(self):
+    def test_repeated_baseline_and_fresh_trials_share_same_twenty_slot_budget(self):
         pool=[item(i,tier='fresh-diversity' if i%2 else 'repeated-baseline') for i in range(100)]
         chosen,summary,_=d.select(pool)
-        self.assertEqual(len(chosen),10)
-        self.assertEqual(sum(summary['selected_tier_counts'].values()),10)
+        self.assertEqual(len(chosen),20)
+        self.assertEqual(sum(summary['selected_tier_counts'].values()),20)
 
     def test_strict_first_then_repeated_inside_each_group(self):
         pool=[item(i,protocol='ss',tier=t) for i,t in enumerate(['fresh-diversity','repeated-baseline','strict-history'])]

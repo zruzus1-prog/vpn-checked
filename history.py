@@ -24,7 +24,8 @@ MEASUREMENT_PROFILE = 'sing-box-1.14.2-v2/https204-stability45-2x2MiB-256KiBs-yo
 BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
                              '976c84b3a09bb8a7decc1c623726f28749720986',
                              '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484',
-                             '4a398dfbc1fae8da90eae755dcda8661871a1cd0'}
+                             '4a398dfbc1fae8da90eae755dcda8661871a1cd0',
+                             'fcb28f217015b2fabe966b52713bcbe52bae62ad'}
 LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Captured allowlists, not a source list supplied by a historical report.
 CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
@@ -33,7 +34,7 @@ MAX_AGE_SECONDS = 48 * 3600
 MAX_BYTES = 12 * 1024 * 1024
 MAX_RUNS = 32
 MAX_ANCHOR_RUNS = 32  # Separate proof-only budget; never extends scored history.
-MAX_ENTRIES = 8192  # Metadata churn budget, separate from live 2048-node probe cap
+MAX_ENTRIES = 8192  # Metadata churn budget, separate from live 4096-node probe cap
 MAX_URI_BYTES = 16384
 STABLE_CAP = 40
 MIN_PASSES = 3
@@ -55,13 +56,13 @@ LEGACY_POLICY = {'retention_seconds': MAX_AGE_SECONDS, 'metadata_entry_cap': MAX
           'scope': 'YouTube-homepage-and-baseline-from-GitHub; not Russia or media-playback proof'}
 
 
-POLICY = {**LEGACY_POLICY,
+POLICY = {**LEGACY_POLICY, 'main_cap': d.MAIN_CAP,
           'selection_policy': d.POLICY,
           'minimum_all_pass_speed_kib_s': MIN_STABLE_KIB_S,
           'minimum_speed_scope': 'strict-history tier only; other tiers retain fresh 256 KiB/s baseline',
           'diversity': 'hard endpoint-prefix,protocol,connection-group,and all-source-owner caps',
           'ranking': d.POLICY['ranking'],
-          'history_scope': 'strict-history and repeated-baseline tiers; at most 10 explicitly classified diversity slots'}
+          'history_scope': 'strict-history and repeated-baseline tiers; at most 20 explicitly classified diversity slots'}
 
 
 def need(condition):
@@ -162,13 +163,21 @@ def prune(state, now):
             'created_at': now.isoformat(), 'runs': kept_runs, 'entries': entries}
 
 
+class CapacityError(ValueError):
+    """Safe count-only nomination diagnostic, containing no upstream text."""
+    def __init__(self, current, retained):
+        self.current, self.retained = current, retained
+        super().__init__(f'candidate capacity exceeded: current={current}, retained={retained}, total={current+retained}, cap={c.MAX_CANDIDATES}; no truncation or publication')
+
+
 def nominate(state, current, at):
     """Current inventory wins exact URI; retained rows never refresh source time."""
     state = prune(state, stamp(at))
     current_ids = {row['id'] for row in current}
     retained = [{'id': e['id'], 'uri': e['uri'], 'sources': e['sources']}
                 for e in state['entries'] if e['id'] not in current_ids and any(o['youtube'] for o in e['observations'])]
-    need(len(current) + len(retained) <= c.MAX_CANDIDATES)
+    if len(current) + len(retained) > c.MAX_CANDIDATES:
+        raise CapacityError(len(current), len(retained))
     return sorted(current + retained, key=lambda e: e['id']), state
 
 
@@ -371,7 +380,7 @@ def authenticate_publication(repo, commit, report, token, *, now):
     expected_keys = {'manifest_sha256','implementation_sha','run_id','run_attempt','source_snapshot_at','core_lock_sha256','shard_size','max_parallel_shards','shard_count','shards'}
     need(isinstance(meta, dict) and set(meta) == expected_keys)
     need(meta['source_snapshot_at'] == report['started_at'] and meta['core_lock_sha256'] == local_lock()[1])
-    need(type(meta['shard_count']) is int and 0 < meta['shard_count'] <= 32 and len(meta['shards']) == meta['shard_count'])
+    need(type(meta['shard_count']) is int and 0 < meta['shard_count'] <= (c.MAX_CANDIDATES + 63) // 64 and len(meta['shards']) == meta['shard_count'])
     need(meta['shard_size'] == 64 and meta['max_parallel_shards'] == 8)
     for key in ('manifest_sha256','core_lock_sha256'):
         need(isinstance(meta[key], str) and re.fullmatch('[0-9a-f]{64}', meta[key]))
@@ -425,6 +434,40 @@ def archived_source_inventory(report):
         yield
     finally:
         c.SOURCES, output_validator.SOURCES = previous
+
+
+
+BALANCED_40_IMPLEMENTATIONS = {
+    '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484',
+    '4a398dfbc1fae8da90eae755dcda8661871a1cd0',
+    'fcb28f217015b2fabe966b52713bcbe52bae62ad',
+}
+
+
+@contextmanager
+def archived_selection_policy(report):
+    """Reproduce the exact old 40-node split only for reviewed predecessors."""
+    global POLICY
+    if report['production']['implementation_sha'] not in BALANCED_40_IMPLEMENTATIONS:
+        yield
+        return
+    names = ('MAIN_CAP', 'EXPLORATORY_CAP', 'PROTOCOL_CAP', 'GROUP_CAP', 'SOURCE_OWNER_CAP')
+    previous = {name: getattr(d, name) for name in names}
+    previous_policy, previous_selection = POLICY, d.POLICY
+    try:
+        for name, value in zip(names, (40, 10, 20, 12, 20)):
+            setattr(d, name, value)
+        d.POLICY = {**d.POLICY, 'version': 'balanced-main-v1', 'main_cap': 40,
+                    'maximum_non_strict_slots': 10, 'maximum_per_protocol': 20,
+                    'maximum_per_protocol_transport_security_plugin_group': 12,
+                    'maximum_per_source_owner': 20}
+        POLICY = {**POLICY, 'main_cap': 40, 'selection_policy': d.POLICY,
+                  'history_scope': 'strict-history and repeated-baseline tiers; at most 10 explicitly classified diversity slots'}
+        yield
+    finally:
+        POLICY, d.POLICY = previous_policy, previous_selection
+        for name, value in previous.items():
+            setattr(d, name, value)
 
 
 def source_anchors_complete(snapshots, now):
@@ -491,7 +534,7 @@ def load_remote(repo, token, *, now=None):
             need(isinstance(parents, list) and len(parents) == 1 and parents[0]['sha'] == sha)
         previous_commit = commit
         root_url = 'https://raw.githubusercontent.com/' + repo + '/' + sha + '/'
-        report_data = remote_read(root_url+'report.json', 32_000_000)
+        report_data = remote_read(root_url+'report.json', 64_000_000)
         report = strict_json(report_data)
         if not snapshots and (now-stamp(report['started_at'])).total_seconds() > MAX_AGE_SECONDS:
             break
@@ -527,7 +570,7 @@ def load_remote(repo, token, *, now=None):
                 (root/'history.json').write_bytes(data)
                 if not snapshots:
                     latest_claim = prune(state, now)
-            with archived_source_inventory(report):
+            with archived_source_inventory(report), archived_selection_policy(report):
                 validate_output(root, as_of=stamp(report['completed_at']), allow_legacy_split=True)
             exports = {c.node_id(uri): uri for uri in (root/c.FEEDS['youtube']).read_text().splitlines()}
             # Retain only bounded compact facts, never all full attempt-heavy reports.

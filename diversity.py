@@ -9,14 +9,14 @@ from fractions import Fraction
 import ipaddress
 from urllib.parse import urlsplit
 
-MAIN_CAP = 40
-EXPLORATORY_CAP = 10
-PROTOCOL_CAP = 20
-GROUP_CAP = 12
-SOURCE_OWNER_CAP = 20
+MAIN_CAP = 80
+EXPLORATORY_CAP = 20
+PROTOCOL_CAP = 40
+GROUP_CAP = 24
+SOURCE_OWNER_CAP = 40
 TIERS = ('strict-history', 'repeated-baseline', 'fresh-diversity')
 POLICY = {
-    'version': 'balanced-main-v1',
+    'version': 'balanced-main-v2-80',
     'main_cap': MAIN_CAP,
     'maximum_non_strict_slots': EXPLORATORY_CAP,
     'maximum_per_endpoint_prefix': 1,
@@ -66,13 +66,15 @@ def connection_group(outbound):
     return '/'.join((protocol, transport, security, outbound.get('plugin') or outbound.get('obfs', {}).get('type', 'plain')))
 
 
-def select(candidates, *, exploratory_cap=EXPLORATORY_CAP):
+def select(candidates, *, exploratory_cap=None):
     """Select IDs; cap=0 also supports an offline strict-only comparison.
 
     Required record keys: id, prefix, group, protocol, owners, tier. No speed,
     latency, raw pass count, exit country, or claimed Russian availability is a
     ranking input. Earlier qualification must produce the categorical tier.
     """
+    if exploratory_cap is None:
+        exploratory_cap = EXPLORATORY_CAP
     require(type(exploratory_cap) is int and 0 <= exploratory_cap <= EXPLORATORY_CAP)
     by_id = {}
     for candidate in candidates:

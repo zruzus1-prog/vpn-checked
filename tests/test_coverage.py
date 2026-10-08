@@ -205,7 +205,7 @@ class CompatibilityTests(unittest.TestCase):
                 c.parse_uri('trojan://synthetic@example.org:443?'+option)
 
     def test_capacity_and_probe_gates_remain_bounded(self):
-        self.assertEqual((c.MAX_CANDIDATES,c.MAX_DEEP,c.WORKERS,c.BUDGET),(2048,2048,4,5400))
+        self.assertEqual((c.MAX_CANDIDATES,c.MAX_DEEP,c.WORKERS,c.BUDGET),(4096,4096,4,5400))
         self.assertEqual((c.STABILITY_SECONDS,c.DOWNLOAD_BYTES,c.MIN_BYTES_PER_SECOND),(45,2*1024*1024,256*1024))
 
 
