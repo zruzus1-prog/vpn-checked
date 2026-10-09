@@ -8,7 +8,7 @@ on:
         required: false
         default: false
   schedule:
-    - cron: '23 */2 * * *'
+    - cron: '23 * * * *'
 permissions:
   contents: read
 concurrency:
@@ -52,7 +52,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 12
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -152,6 +152,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git ls-remote --heads origin refs/heads/main | cut -f1)" = "$GITHUB_SHA"
+          publication_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python3 publish_status.py --output /tmp/checked-output --publication-at "$publication_at"
+          export GIT_AUTHOR_DATE="$publication_at" GIT_COMMITTER_DATE="$publication_at"
           cp LICENSE NOTICE.md /tmp/checked-output/
           cp -r licenses /tmp/checked-output/
           expected="$(git ls-remote --heads origin refs/heads/checked | cut -f1)"
@@ -165,7 +168,7 @@ jobs:
           fi
           git rm -r --ignore-unmatch .
           cp -r /tmp/checked-output/. .
-          git add -- subscription.txt subscription-gpt.txt subscription-youtube.txt subscription-youtube-stable.txt subscription-youtube-reserve.txt history.json report.json LICENSE NOTICE.md licenses
+          git add -- subscription.txt subscription-gpt.txt subscription-youtube.txt subscription-youtube-stable.txt subscription-youtube-reserve.txt history.json report.json STATUS.md LICENSE NOTICE.md licenses
           if git diff --cached --quiet; then
             echo 'Snapshot unchanged; nothing to publish.'
             exit 0

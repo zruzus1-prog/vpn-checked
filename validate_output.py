@@ -252,12 +252,12 @@ def validate(root, *, as_of=None, allow_legacy_split=False):
     report=strict_json(report_path.read_bytes())
     extra_files=set()
     if isinstance(report,dict) and 'history' in report:
-        from history import SPLIT_FEEDS
+        from history import SPLIT_FEEDS, MAX_BYTES as MAX_HISTORY_BYTES
         extra_files={*SPLIT_FEEDS.values(),'history.json'}
     if {p.name for p in root.iterdir()} != {*FEEDS.values(), 'report.json'}|extra_files:
         raise ValueError('unexpected output files')
     for p in root.iterdir():
-        if p.is_symlink() or not p.is_file() or p.stat().st_size > (64_000_000 if p.name=='report.json' else 12*1024*1024 if p.name=='history.json' else 4_000_000):
+        if p.is_symlink() or not p.is_file() or p.stat().st_size > (64_000_000 if p.name=='report.json' else MAX_HISTORY_BYTES if p.name=='history.json' else 4_000_000):
             raise ValueError('invalid output file')
     allowed={'schema_version','started_at','completed_at','vantage','probe_origin','identity_version',
         'identity_scope','core','sources','raw_lines','raw_unique_lines','supported_lines','unique_candidates',

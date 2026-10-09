@@ -82,7 +82,8 @@ class RolloverTests(unittest.TestCase):
     def commit_pages(self, remote, api, commits):
         newest_first = list(reversed(commits))
         remote[api + '/commits?sha=checked&per_page=32'] = h.encoded(newest_first[:32])
-        remote[api + '/commits?sha=checked&per_page=32&page=2'] = h.encoded(newest_first[32:64])
+        for page in range(2, 5):
+            remote[api + f'/commits?sha=checked&per_page=32&page={page}'] = h.encoded(newest_first[(page-1)*32:page*32])
 
     def test_expired_epoch_reappearance_survives_generation_and_next_replay(self):
         now, remote, root = self.publications(hours=(78, 70, 46, 40, 35, 1),
@@ -101,6 +102,17 @@ class RolloverTests(unittest.TestCase):
                                               current_indexes={0, 10, 45, 70, 80}, replay_seed=True)
         published = h.strict_json(remote[root + 'history.json'])
         for hours in (1, 24, 28, 28.000001, 48, 48.000001, 96):
+            at = now + timedelta(hours=hours)
+            self.assertEqual(self.replay(remote, at), h.prune(published, at))
+
+    def test_week_of_hourly_publications_with_chained_replay(self):
+        now, remote, root = self.publications(
+            hours=tuple(age-index/3600 for index, age in enumerate(range(170, -1, -1))),
+            current_indexes={0, 30, 81, 130, 165}, replay_seed=True)
+        published = h.strict_json(remote[root + 'history.json'])
+        self.assertGreater(len(published['runs']), 32)
+        self.assertLessEqual(len(published['runs']), 49)
+        for hours in (0.1, 1, 24, 47, 48, 48.000001, 96):
             at = now + timedelta(hours=hours)
             self.assertEqual(self.replay(remote, at), h.prune(published, at))
 

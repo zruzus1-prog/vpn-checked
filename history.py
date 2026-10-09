@@ -25,15 +25,16 @@ BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
                              '976c84b3a09bb8a7decc1c623726f28749720986',
                              '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484',
                              '4a398dfbc1fae8da90eae755dcda8661871a1cd0',
-                             'fcb28f217015b2fabe966b52713bcbe52bae62ad'}
+                             'fcb28f217015b2fabe966b52713bcbe52bae62ad',
+                             '144c2dea096443d2db6829fe0a8e61e88abdf6b2'}
 LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Captured allowlists, not a source list supplied by a historical report.
 CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
 LEGACY_SOURCE_INVENTORY = CURRENT_SOURCE_INVENTORY[:-1]
 MAX_AGE_SECONDS = 48 * 3600
-MAX_BYTES = 12 * 1024 * 1024
-MAX_RUNS = 32
-MAX_ANCHOR_RUNS = 32  # Separate proof-only budget; never extends scored history.
+MAX_BYTES = 48 * 1024 * 1024
+MAX_RUNS = 64
+MAX_ANCHOR_RUNS = 64  # Separate proof-only budget; never extends scored history.
 MAX_ENTRIES = 8192  # Metadata churn budget, separate from live 4096-node probe cap
 MAX_URI_BYTES = 16384
 STABLE_CAP = 40
@@ -381,7 +382,8 @@ def authenticate_publication(repo, commit, report, token, *, now):
     need(isinstance(meta, dict) and set(meta) == expected_keys)
     need(meta['source_snapshot_at'] == report['started_at'] and meta['core_lock_sha256'] == local_lock()[1])
     need(type(meta['shard_count']) is int and 0 < meta['shard_count'] <= (c.MAX_CANDIDATES + 63) // 64 and len(meta['shards']) == meta['shard_count'])
-    need(meta['shard_size'] == 64 and meta['max_parallel_shards'] == 8)
+    expected_parallel = 8 if meta['implementation_sha'] in BOOTSTRAP_IMPLEMENTATIONS else 12
+    need(meta['shard_size'] == 64 and meta['max_parallel_shards'] == expected_parallel)
     for key in ('manifest_sha256','core_lock_sha256'):
         need(isinstance(meta[key], str) and re.fullmatch('[0-9a-f]{64}', meta[key]))
     for index, receipt in enumerate(meta['shards']):
@@ -505,13 +507,18 @@ def load_remote(repo, token, *, now=None):
     except urllib.error.HTTPError as exc:
         if exc.code != 404: raise
         return empty(now.isoformat()), {'checked_commit': None, 'authenticated_snapshots': 0, 'mode': 'cold-start'}
-    need(isinstance(commits, list) and len(commits) <= MAX_RUNS)
-    # A two-hour schedule needs up to 49 snapshots to prove a full 96-hour
-    # anchor horizon. Keep the live 32-run cap and bound proof-only pagination.
-    if len(commits) == MAX_RUNS and (now-stamp(commits[-1]['commit']['committer']['date'])).total_seconds() <= 2 * MAX_AGE_SECONDS:
-        anchors = strict_json(remote_read(base+'/commits?sha=checked&per_page=32&page=2', 8*1024*1024, token))
-        need(isinstance(anchors, list) and len(anchors) <= MAX_ANCHOR_RUNS)
-        commits += anchors
+    page_size = 32
+    need(isinstance(commits, list) and len(commits) <= page_size)
+    # At hourly cadence the inclusive 96-hour proof horizon can span 97
+    # commits. Four fixed pages bound API work; live/anchor caps stay separate.
+    for page in range(2, (MAX_RUNS + MAX_ANCHOR_RUNS) // page_size + 1):
+        if len(commits) < (page - 1) * page_size:
+            break
+        if (now-stamp(commits[-1]['commit']['committer']['date'])).total_seconds() > 2 * MAX_AGE_SECONDS:
+            break
+        older = strict_json(remote_read(base+f'/commits?sha=checked&per_page=32&page={page}', 8*1024*1024, token))
+        need(isinstance(older, list) and len(older) <= page_size)
+        commits += older
     snapshots = []
     live_snapshots = anchor_snapshots = 0
     # One additional window supplies direct source-presence anchors for the

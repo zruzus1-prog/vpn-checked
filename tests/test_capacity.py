@@ -27,7 +27,7 @@ class CapacityTests(unittest.TestCase):
     def test_exact_4096_full_merge_and_missing_duplicate_last_shard(self):
         manifest = self.prepare(4096)
         self.assertEqual(len(manifest['shards']), 64)
-        self.assertEqual(p.MAX_PARALLEL, 8)
+        self.assertEqual(p.MAX_PARALLEL, 12)
         self.run_shards(manifest)
         last = self.shards/'shard-063.json'
         data = last.read_bytes()
@@ -103,5 +103,5 @@ class ArchiveCapacityTests(unittest.TestCase):
 
     def test_byte_budget_contracts_are_not_unbounded(self):
         self.assertEqual((p.MAX_REPORT_BYTES,p.MAX_MANIFEST_BYTES,p.MAX_SHARD_BYTES,h.MAX_BYTES),
-                         (64_000_000,24*1024*1024,4*1024*1024,12*1024*1024))
-        self.assertEqual((h.MAX_RUNS,h.MAX_AGE_SECONDS,h.MAX_ENTRIES),(32,48*3600,8192))
+                         (64_000_000,64*1024*1024,4*1024*1024,48*1024*1024))
+        self.assertEqual((h.MAX_RUNS,h.MAX_AGE_SECONDS,h.MAX_ENTRIES),(64,48*3600,8192))
