@@ -27,7 +27,7 @@ class CapacityTests(unittest.TestCase):
     def test_exact_4096_full_merge_and_missing_duplicate_last_shard(self):
         manifest = self.prepare(4096)
         self.assertEqual(len(manifest['shards']), 64)
-        self.assertEqual(p.MAX_PARALLEL, 12)
+        self.assertEqual(p.MAX_PARALLEL, 8)
         self.run_shards(manifest)
         last = self.shards/'shard-063.json'
         data = last.read_bytes()

@@ -26,7 +26,9 @@ BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
                              '2ebfbd4c8d64c3c3d40577d3d5688cbf51579484',
                              '4a398dfbc1fae8da90eae755dcda8661871a1cd0',
                              'fcb28f217015b2fabe966b52713bcbe52bae62ad',
-                             '144c2dea096443d2db6829fe0a8e61e88abdf6b2'}
+                             '144c2dea096443d2db6829fe0a8e61e88abdf6b2',
+                             'b6ad19206976ccdc66069f929b0bb29e9cc8d82b'}
+TWELVE_WAY_IMPLEMENTATIONS = {'b6ad19206976ccdc66069f929b0bb29e9cc8d82b'}
 LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Captured allowlists, not a source list supplied by a historical report.
 CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
@@ -382,7 +384,7 @@ def authenticate_publication(repo, commit, report, token, *, now):
     need(isinstance(meta, dict) and set(meta) == expected_keys)
     need(meta['source_snapshot_at'] == report['started_at'] and meta['core_lock_sha256'] == local_lock()[1])
     need(type(meta['shard_count']) is int and 0 < meta['shard_count'] <= (c.MAX_CANDIDATES + 63) // 64 and len(meta['shards']) == meta['shard_count'])
-    expected_parallel = 8 if meta['implementation_sha'] in BOOTSTRAP_IMPLEMENTATIONS else 12
+    expected_parallel = 12 if meta['implementation_sha'] in TWELVE_WAY_IMPLEMENTATIONS else 8
     need(meta['shard_size'] == 64 and meta['max_parallel_shards'] == expected_parallel)
     for key in ('manifest_sha256','core_lock_sha256'):
         need(isinstance(meta[key], str) and re.fullmatch('[0-9a-f]{64}', meta[key]))

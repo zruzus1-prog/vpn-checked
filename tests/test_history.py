@@ -238,7 +238,7 @@ class AuthenticationTests(unittest.TestCase):
             'core':core_info(),'started_at':at,'completed_at':done,
             'limits':{'stability_window_seconds':c.STABILITY_SECONDS,'download_bytes_per_sample':c.DOWNLOAD_BYTES,
                       'download_samples':2,'min_kib_s':c.MIN_BYTES_PER_SECOND//1024},
-            'production':{'manifest_sha256':'c'*64,'implementation_sha':next(iter(h.BOOTSTRAP_IMPLEMENTATIONS)),
+            'production':{'manifest_sha256':'c'*64,'implementation_sha':'144c2dea096443d2db6829fe0a8e61e88abdf6b2',
                 'run_id':'123','run_attempt':'1','source_snapshot_at':at,'core_lock_sha256':lock_digest,
                 'shard_size':64,'max_parallel_shards':8,'shard_count':1,
                 'shards':[{'id':'000','sha256':'e'*64,'started_at':at,'completed_at':done}]}}
@@ -246,7 +246,7 @@ class AuthenticationTests(unittest.TestCase):
             'email':'41898282+github-actions[bot]@users.noreply.github.com','date':NOW.isoformat()}}}
         run={'id':123,'run_attempt':1,'conclusion':'success','status':'completed',
             'repository':{'full_name':'owner/repo'},'head_repository':{'full_name':'owner/repo'},
-            'head_branch':'main','head_sha':next(iter(h.BOOTSTRAP_IMPLEMENTATIONS)),
+            'head_branch':'main','head_sha':'144c2dea096443d2db6829fe0a8e61e88abdf6b2',
             'path':'.github/workflows/check.yml','event':'schedule',
             'run_started_at':at,'updated_at':NOW.isoformat()}
         jobs={'total_count':1,'jobs':[{'name':'publish','conclusion':'success','started_at':done,'completed_at':NOW.isoformat()}]}
@@ -256,6 +256,23 @@ class AuthenticationTests(unittest.TestCase):
         report,commit,run,jobs=self.fixtures()
         with patch('history.remote_read',side_effect=[h.encoded(run),h.encoded(jobs)]):
             self.assertEqual(h.authenticate_publication('owner/repo',commit,report,'token',now=NOW),'schedule')
+
+    def test_parallel_metadata_is_exact_for_twelve_way_predecessor_and_current(self):
+        for implementation, expected in [('b6ad19206976ccdc66069f929b0bb29e9cc8d82b',12),
+                                          ('144c2dea096443d2db6829fe0a8e61e88abdf6b2',8),
+                                          ('e'*40,8)]:
+            for claimed in (8,12,16):
+                report,commit,run,jobs=self.fixtures()
+                report['production'].update(implementation_sha=implementation,max_parallel_shards=claimed)
+                run['head_sha']=implementation
+                with self.subTest(implementation=implementation,claimed=claimed), \
+                     patch.dict(os.environ,{'GITHUB_SHA':'e'*40}), \
+                     patch('history.remote_read',side_effect=[h.encoded(run),h.encoded(jobs)]):
+                    if claimed==expected:
+                        self.assertEqual(h.authenticate_publication('owner/repo',commit,report,None,now=NOW),'schedule')
+                    else:
+                        with self.assertRaises(ValueError):
+                            h.authenticate_publication('owner/repo',commit,report,None,now=NOW)
 
     def test_dry_run_fork_wrong_event_head_attempt_and_policy_rejected(self):
         mutators=[lambda r,j:j['jobs'][0].update(conclusion='skipped'),

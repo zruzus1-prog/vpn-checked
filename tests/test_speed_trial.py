@@ -64,7 +64,7 @@ class SpeedTrialTests(unittest.TestCase):
     def test_workflow_scope(self):
         workflow = (Path(__file__).resolve().parents[1]/'.github/workflows/check.yml').read_text()
         self.assertIn("cron: '23 * * * *'", workflow)
-        self.assertIn('max-parallel: 12', workflow)
+        self.assertIn('max-parallel: 8', workflow)
         self.assertIn('export GIT_AUTHOR_DATE="$publication_at" GIT_COMMITTER_DATE="$publication_at"', workflow)
         self.assertLess(workflow.index('production.py verify-public'), workflow.index('python3 publish_status.py'))
         self.assertIn('history.json report.json STATUS.md LICENSE', workflow)

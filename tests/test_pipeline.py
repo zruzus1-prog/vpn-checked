@@ -377,7 +377,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("github.event_name == 'schedule'", text)
         self.assertIn("inputs.publish == true", text)
         self.assertIn('needs: [prepare, merge]', text)
-        self.assertIn('max-parallel: 12', text)
+        self.assertIn('max-parallel: 8', text)
         self.assertIn('fail-fast: false', text)
         self.assertIn('--force-with-lease="refs/heads/checked:$expected"', text)
         self.assertNotIn('git push --force origin', text)
