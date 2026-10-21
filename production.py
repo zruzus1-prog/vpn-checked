@@ -30,6 +30,12 @@ MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 MAX_SHARD_BYTES = 4 * 1024 * 1024
 MAX_REPORT_BYTES = 64_000_000
 CORE_LOCK = Path(__file__).with_name('core-lock.json')
+DIAGNOSTIC_STAGE = 'startup'
+DIAGNOSTIC_STAGES = {'startup', 'prepare', 'prepare.sources', 'prepare.history',
+    'prepare.nomination', 'prepare.manifest', 'shard', 'shard.manifest',
+    'shard.preflight', 'shard.probes', 'shard.validation', 'merge',
+    'merge.manifest', 'merge.shards', 'merge.history', 'merge.output',
+    'verify-public', 'verify.manifest', 'verify.output', 'verify.binding'}
 STAT_KEYS = {'raw_lines', 'raw_unique_lines', 'supported_lines', 'unique_candidates',
              'unique_endpoints', 'duplicate_supported_lines',
              'cross_source_duplicate_candidates', 'unsupported_or_rejected_lines',
@@ -53,6 +59,59 @@ class PipelineError(ValueError):
 def require(condition, message):
     if not condition:
         raise PipelineError(message)
+
+
+def diagnostic_stage(stage):
+    global DIAGNOSTIC_STAGE
+    require(stage in DIAGNOSTIC_STAGES, 'invalid diagnostic stage')
+    DIAGNOSTIC_STAGE = stage
+
+
+def diagnostic_record(outcome, exc=None):
+    """Fixed codes only: exception text, URLs, URIs and headers are never emitted."""
+    record = {'schema_version': 1, 'stage': DIAGNOSTIC_STAGE,
+              'outcome': outcome, 'code': 'ok' if exc is None else 'validation.failed'}
+    if exc is not None:
+        codes = {
+            'invalid trusted history': 'history.validation_failed',
+            'historical candidate expired before publication': 'history.retained_expired',
+            'stale or future artifact': 'freshness.expired',
+            'stale node measurement': 'freshness.expired',
+            'one or more sources unavailable; do not publish': 'sources.unavailable',
+            'incomplete or infrastructure-failed assessment': 'assessment.infrastructure_failed',
+            'official core rejected candidate configuration': 'core.schema_rejected',
+            'core preflight deadline': 'budget.exhausted',
+            'shard exceeded its deadline': 'budget.exhausted',
+            'manifest digest mismatch': 'manifest.digest_mismatch',
+            'incomplete retained candidate inventory': 'history.nomination_mismatch',
+        }
+        if isinstance(exc, h.RemoteReadError):
+            if exc.reason in {'http_status', 'timeout', 'connection', 'deadline',
+                              'tls', 'redirect', 'oversize', 'transport'}:
+                record['code'] = 'history.fetch.' + exc.reason
+            if type(exc.status) is int and 100 <= exc.status <= 599:
+                record['http_status'] = exc.status
+            if type(exc.attempts) is int and 0 <= exc.attempts <= 3:
+                record['attempts'] = exc.attempts
+        elif isinstance(exc, subprocess.TimeoutExpired):
+            record['code'] = 'process.timeout'
+        elif isinstance(exc, OSError):
+            record['code'] = 'io.failed'
+        elif len(exc.args) == 1 and type(exc.args[0]) is str:
+            record['code'] = codes.get(exc.args[0], 'validation.failed')
+    return record
+
+
+def emit_diagnostic(outcome, exc=None):
+    record = diagnostic_record(outcome, exc)
+    print(json.dumps(record, sort_keys=True), file=sys.stderr if exc else sys.stdout, flush=True)
+    directory = os.environ.get('VPN_DIAGNOSTICS_DIR')
+    if directory:
+        try:
+            write_json(Path(directory) / 'diagnostic.json', record, 4096)
+        except (ValueError, OSError):
+            # Diagnostics must not mask the original failure or expose path details.
+            print('{"code":"diagnostics.write_failed"}', file=sys.stderr)
 
 
 def now_iso():
@@ -271,10 +330,10 @@ def validate_history_manifest(manifest, now):
     require(isinstance(current_ids, list) and current_ids == sorted(set(current_ids)), 'invalid current inventory')
     by_id = {row['id']: row for row in manifest['candidates']}
     require(set(current_ids) <= set(by_id), 'missing current candidate')
-    historical = {e['id']: e for e in h.prune(history['state'], instant(manifest['created_at']))['entries']
-                  if any(o['youtube'] for o in e['observations'])}
+    historical = {e['id']: e for e in h.eligible_retained(
+        history['state'], current_ids, manifest['created_at'])}
     retained = set(by_id)-set(current_ids)
-    require(retained == set(historical)-set(current_ids), 'incomplete retained candidate inventory')
+    require(retained == set(historical), 'incomplete retained candidate inventory')
     for rid in retained:
         require(by_id[rid] == {k: historical[rid][k] for k in ('id', 'uri', 'sources')},
                 'historical candidate altered')
@@ -289,7 +348,8 @@ def build_history(manifest, results, exports):
                      run_id=manifest['run_id'], run_attempt=manifest['run_attempt'],
                      event=manifest['history']['event'],
                      seen_at={row['id']: max(times[u] for u in row['sources']) for row in current})
-    feeds, ranking = h.split(state, results, exports)
+    youtube_ids = {row['id'] for row in results if row['service_qualified']['youtube']}
+    feeds, ranking = h.split(state, results, {rid: uri for rid, uri in exports.items() if rid in youtube_ids})
     metadata = {'state_sha256': digest(h.encoded(state)), 'provenance': manifest['history']['provenance'],
                 'current_candidates': len(current), 'retained_candidates': len(by_id)-len(current),
                 'assessed_candidates': len(by_id), 'current_ids': manifest['history']['current_ids'],
@@ -307,6 +367,7 @@ def load_manifest(path, digest_path=None):
 
 
 def prepare(path, *, use_history=False):
+    diagnostic_stage('prepare.sources')
     normalized, provenance, sources, stats = c.collect_candidates()
     # Count-only overflow diagnostics never include candidate URIs or secrets.
     summary = {'prepared_at': now_iso(), 'sources': sources, 'stats': stats,
@@ -328,11 +389,13 @@ def prepare(path, *, use_history=False):
                          for key, uri in normalized.items()), key=lambda row: row['id'])
     created_at = now_iso()
     if use_history:
+        diagnostic_stage('prepare.history')
         state, provenance_info = h.load_remote(os.environ.get('GITHUB_REPOSITORY', ''),
                                               os.environ.get('GH_TOKEN'), now=instant(created_at))
     else:
         state, provenance_info = h.empty(created_at), {'checked_commit': None, 'authenticated_snapshots': 0, 'mode': 'local-empty'}
     current_ids = [row['id'] for row in candidates]
+    diagnostic_stage('prepare.nomination')
     try:
         candidates, state = h.nominate(state, candidates, created_at)
     except h.CapacityError as exc:
@@ -354,6 +417,7 @@ def prepare(path, *, use_history=False):
                 'shards': [{'id': f'{index // SHARD_SIZE:03d}',
                             'candidate_ids': [row['id'] for row in candidates[index:index+SHARD_SIZE]]}
                            for index in range(0, len(candidates), SHARD_SIZE)]}
+    diagnostic_stage('prepare.manifest')
     validate_manifest(manifest)
     actual_digest = write_json(path, manifest, MAX_MANIFEST_BYTES)
     Path(path).with_suffix('.sha256').write_text(actual_digest + '\n', encoding='ascii')
@@ -451,6 +515,7 @@ def preflight_core(candidates, core, deadline):
 
 
 def check_shard(manifest_path, shard_id, output, core):
+    diagnostic_stage('shard.manifest')
     manifest, manifest_digest = load_manifest(manifest_path)
     shard = expected_shard(manifest, shard_id)
     ids = shard['candidate_ids']
@@ -461,8 +526,10 @@ def check_shard(manifest_path, shard_id, output, core):
     budget = c.DeepBudget(len(ids))
     by_id = {row['id']: row for row in manifest['candidates']}
     candidates = [by_id[rid] for rid in ids]
+    diagnostic_stage('shard.preflight')
     preflight_core(candidates, core, deadline)
     results, exports = [], {}
+    diagnostic_stage('shard.probes')
     with concurrent.futures.ThreadPoolExecutor(max_workers=c.WORKERS) as pool:
         for candidate, (result, uri) in zip(candidates, pool.map(
                 lambda item: c.probe(item['uri'], core, deadline, budget), candidates)):
@@ -474,6 +541,7 @@ def check_shard(manifest_path, shard_id, output, core):
                 exports[candidate['id']] = uri
     completed_at = now_iso()
     require(time.monotonic() <= deadline, 'shard exceeded its deadline')
+    diagnostic_stage('shard.validation')
     validate_results(manifest, results, exports, ids, started_at=started_at, completed_at=completed_at)
     payload = {'schema_version': SCHEMA, 'manifest_sha256': manifest_digest,
                'shard_id': shard_id, 'implementation_sha': manifest['implementation_sha'],
@@ -506,6 +574,7 @@ def resource_summary(results, receipts, started_at):
 
 
 def merge(manifest_path, shard_dir, output):
+    diagnostic_stage('merge.manifest')
     manifest, manifest_digest = load_manifest(manifest_path)
     shard_dir = Path(shard_dir)
     require(not shard_dir.is_symlink() and shard_dir.is_dir(), 'invalid shard directory')
@@ -515,6 +584,7 @@ def merge(manifest_path, shard_dir, output):
     all_results, all_exports, receipts = [], {}, []
     core_info = None
     origin = None
+    diagnostic_stage('merge.shards')
     for shard in manifest['shards']:
         payload, payload_digest = read_json(shard_dir / ('shard-' + shard['id'] + '.json'), MAX_SHARD_BYTES)
         require(set(payload) == SHARD_KEYS and type(payload['schema_version']) is int and
@@ -545,7 +615,9 @@ def merge(manifest_path, shard_dir, output):
                 if row['service_qualified'][service]:
                     accepted[service].append(uri)
     metadata = production_metadata(manifest, manifest_digest, receipts)
+    diagnostic_stage('merge.history')
     state, split_feeds, history_metadata = build_history(manifest, all_results, all_exports)
+    diagnostic_stage('merge.output')
     resources = resource_summary(all_results, receipts, manifest['created_at'])
     c.write_report(Path(output), manifest['sources'], manifest['stats'], all_results, accepted,
                    manifest['created_at'], core_info, {'production': metadata, 'history': history_metadata, 'resources': resources})
@@ -562,8 +634,11 @@ def merge(manifest_path, shard_dir, output):
 def verify_public(manifest_path, output):
     """Repeat the independent output validator and frozen-source binding at publish."""
     from validate_output import validate
+    diagnostic_stage('verify.manifest')
     manifest, manifest_digest = load_manifest(manifest_path)
+    diagnostic_stage('verify.output')
     validate(output)
+    diagnostic_stage('verify.binding')
     report, _ = read_json(Path(output) / 'report.json', MAX_REPORT_BYTES)
     validate_core(report.get('core'), manifest['core_lock'])
     require(report.get('probe_origin') == c.probe_origin(), 'unexpected public probing origin')
@@ -639,6 +714,7 @@ def main():
         elif name == 'merge':
             command.add_argument('--shards', required=True)
     args = parser.parse_args()
+    diagnostic_stage(args.command)
     if args.command == 'prepare':
         prepare(args.manifest, use_history=args.history)
     elif args.command == 'shard':
@@ -649,11 +725,16 @@ def main():
         verify_public(args.manifest, args.output)
 
 
-if __name__ == '__main__':
+def run_cli():
     try:
         main()
     except (ValueError, KeyError, TypeError, OSError, RuntimeError, RecursionError, subprocess.SubprocessError) as exc:
-        # Candidate authentication data can occur in exception details.
-        print('Production validation failed; no publication. ' +
-              (str(exc) if isinstance(exc, PipelineError) else 'See stage and offline validation tests.'), file=sys.stderr)
-        raise SystemExit(1)
+        emit_diagnostic('failure', exc)
+        return 1
+    emit_diagnostic('success')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(run_cli())
+

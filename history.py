@@ -6,13 +6,18 @@ candidate for retest, never qualify an export. No configuration data is logged.
 """
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
+import errno
 import hashlib
+import http.client
 import json
 import math
 import os
 from pathlib import Path
 import re
+import socket
+import ssl
 import tempfile
+import time
 import urllib.request
 import urllib.error
 
@@ -27,7 +32,8 @@ BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
                              '4a398dfbc1fae8da90eae755dcda8661871a1cd0',
                              'fcb28f217015b2fabe966b52713bcbe52bae62ad',
                              '144c2dea096443d2db6829fe0a8e61e88abdf6b2',
-                             'b6ad19206976ccdc66069f929b0bb29e9cc8d82b'}
+                             'b6ad19206976ccdc66069f929b0bb29e9cc8d82b',
+                             '5d771ea965937d6ee7db1f305f9c5680a78a35b3'}
 TWELVE_WAY_IMPLEMENTATIONS = {'b6ad19206976ccdc66069f929b0bb29e9cc8d82b'}
 LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Captured allowlists, not a source list supplied by a historical report.
@@ -39,6 +45,12 @@ MAX_RUNS = 64
 MAX_ANCHOR_RUNS = 64  # Separate proof-only budget; never extends scored history.
 MAX_ENTRIES = 8192  # Metadata churn budget, separate from live 4096-node probe cap
 MAX_URI_BYTES = 16384
+REMOTE_MAX_ATTEMPTS = 3
+REMOTE_DEADLINE_SECONDS = 90
+REMOTE_TIMEOUT_SECONDS = 30
+REMOTE_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+REMOTE_READ_REASONS = frozenset({'timeout', 'connection', 'http_status', 'tls',
+                                 'redirect', 'oversize', 'transport', 'deadline'})
 STABLE_CAP = 40
 MIN_PASSES = 3
 MIN_SPAN_SECONDS = 6 * 3600
@@ -177,11 +189,27 @@ def nominate(state, current, at):
     """Current inventory wins exact URI; retained rows never refresh source time."""
     state = prune(state, stamp(at))
     current_ids = {row['id'] for row in current}
-    retained = [{'id': e['id'], 'uri': e['uri'], 'sources': e['sources']}
-                for e in state['entries'] if e['id'] not in current_ids and any(o['youtube'] for o in e['observations'])]
+    retained = eligible_retained(state, current_ids, at)
     if len(current) + len(retained) > c.MAX_CANDIDATES:
         raise CapacityError(len(current), len(retained))
     return sorted(current + retained, key=lambda e: e['id']), state
+
+
+def eligible_retained(state, current_ids, at):
+    """Nominate at the frozen snapshot time, without shortening metadata history.
+
+    Missing-source candidates need enough source lifetime for the entire fresh
+    result window. Current-source candidates are handled separately and never
+    lose eligibility to this margin. Pruning here also excludes expired passes.
+    """
+    now = stamp(at) if isinstance(at, str) else stamp(at.isoformat())
+    state = prune(state, now)
+    current_ids = set(current_ids)
+    cutoff = now - timedelta(seconds=MAX_AGE_SECONDS - c.MAX_RESULT_AGE_SECONDS)
+    return [{'id': e['id'], 'uri': e['uri'], 'sources': list(e['sources'])}
+            for e in state['entries']
+            if e['id'] not in current_ids and stamp(e['last_upstream_seen_at']) >= cutoff
+            and any(o['youtube'] for o in e['observations'])]
 
 
 def measured_min_speed(row):
@@ -347,22 +375,113 @@ def strict_json(data):
                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid history JSON')))
 
 
+class RemoteReadError(ValueError):
+    """Constant-code history transport diagnostics, never URLs or server text."""
+    def __init__(self, reason, *, status=None, attempts):
+        need(reason in REMOTE_READ_REASONS)
+        need(status is None or type(status) is int and 100 <= status <= 599)
+        need(type(attempts) is int and 0 <= attempts <= REMOTE_MAX_ATTEMPTS)
+        self.reason, self.status, self.attempts = reason, status, attempts
+        super().__init__(f'history read failed: reason={reason}, status={status}, attempts={attempts}')
+
+
+def _transport_failure(exc):
+    """Only known timeout/connection failures may retry; TLS always fails closed."""
+    if isinstance(exc, ssl.SSLError):
+        return 'tls', False
+    if isinstance(exc, TimeoutError):
+        return 'timeout', True
+    if isinstance(exc, (ConnectionError, http.client.IncompleteRead)):
+        return 'connection', True
+    if isinstance(exc, socket.gaierror):
+        return 'connection', exc.errno == socket.EAI_AGAIN
+    if isinstance(exc, OSError) and exc.errno in {
+            errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNABORTED, errno.ECONNREFUSED,
+            errno.EPIPE, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN}:
+        return 'connection', True
+    return 'transport', False
+
+
+def _bounded_remote_body(response, maximum, deadline, attempt):
+    """Keep the byte cap and check the retry budget between bounded body reads.
+
+    Socket timeouts bound inactivity, not complete DNS, headers or framing.
+    The workflow's unchanged prepare timeout remains the hard wall-clock cap.
+    """
+    parts, size = [], 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RemoteReadError('deadline', attempts=attempt)
+        # urllib's initial timeout does not shrink while a body arrives. Set the
+        # live socket timeout before each bounded read to reduce inactivity wait.
+        transport = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+        if transport is not None:
+            transport.settimeout(min(REMOTE_TIMEOUT_SECONDS, remaining))
+        chunk = response.read1(min(64 * 1024, maximum + 1 - size))
+        if time.monotonic() >= deadline:
+            raise RemoteReadError('deadline', attempts=attempt)
+        if not chunk:
+            if getattr(response, 'length', None) not in (None, 0):
+                raise http.client.IncompleteRead(b'')
+            return b''.join(parts)
+        size += len(chunk)
+        if size > maximum:
+            raise RemoteReadError('oversize', attempts=attempt)
+        parts.append(chunk)
+
+
 def remote_read(url, maximum, token=None):
-    """Only fixed GitHub endpoints, bounded TLS fetches, no redirect credential leak."""
+    """Attempt-bounded GETs with a checked retry budget and socket timeouts.
+
+    This is not a hard DNS/header/framing wall-clock limit. The prepare job has
+    a separate fixed timeout. Never bypass TLS, redirects or trusted validation.
+    """
     allowed = ('https://api.github.com/repos/', 'https://raw.githubusercontent.com/')
-    need(any(url.startswith(prefix) for prefix in allowed))
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            raise ValueError('history redirects forbidden')
+    need(isinstance(url, str) and any(url.startswith(prefix) for prefix in allowed))
+    need(type(maximum) is int and maximum >= 0)
     headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'vpn-checked-history'}
     if token and url.startswith(allowed[0]):
         headers['Authorization'] = 'Bearer ' + token
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
-        need(response.status == 200)
-        data = response.read(maximum + 1)
-    need(len(data) <= maximum)
-    return data
+    request = urllib.request.Request(url, headers=headers, method='GET')
+    deadline = time.monotonic() + REMOTE_DEADLINE_SECONDS
+    for attempt in range(1, REMOTE_MAX_ATTEMPTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RemoteReadError('deadline', attempts=attempt - 1)
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                raise RemoteReadError('redirect', status=code, attempts=attempt)
+
+        try:
+            with urllib.request.build_opener(NoRedirect).open(
+                    request, timeout=min(REMOTE_TIMEOUT_SECONDS, remaining)) as response:
+                if response.status != 200:
+                    raise RemoteReadError('http_status', status=response.status, attempts=attempt)
+                return _bounded_remote_body(response, maximum, deadline, attempt)
+        except RemoteReadError as exc:
+            error = exc
+            retry = exc.reason == 'http_status' and exc.status in REMOTE_RETRY_STATUSES
+        except urllib.error.HTTPError as exc:
+            status = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None
+            reason = 'redirect' if status is not None and 300 <= status < 400 else 'http_status'
+            error = RemoteReadError(reason, status=status, attempts=attempt)
+            retry = status in REMOTE_RETRY_STATUSES
+            exc.close()
+        except urllib.error.URLError as exc:
+            reason, retry = _transport_failure(exc.reason)
+            error = RemoteReadError(reason, attempts=attempt)
+        except (OSError, http.client.HTTPException) as exc:
+            reason, retry = _transport_failure(exc)
+            error = RemoteReadError(reason, attempts=attempt)
+        if not retry or attempt == REMOTE_MAX_ATTEMPTS:
+            raise error from None
+        remaining = deadline - time.monotonic()
+        delay = attempt  # Bounded 1s/2s backoff; Retry-After cannot enlarge the budget.
+        if remaining <= delay:
+            raise RemoteReadError('deadline', attempts=attempt) from None
+        time.sleep(delay)
 
 
 def authenticate_publication(repo, commit, report, token, *, now):
@@ -506,8 +625,8 @@ def load_remote(repo, token, *, now=None):
     base = 'https://api.github.com/repos/' + repo
     try:
         commits = strict_json(remote_read(base+'/commits?sha=checked&per_page=32', 8*1024*1024, token))
-    except urllib.error.HTTPError as exc:
-        if exc.code != 404: raise
+    except RemoteReadError as exc:
+        if exc.status != 404: raise
         return empty(now.isoformat()), {'checked_commit': None, 'authenticated_snapshots': 0, 'mode': 'cold-start'}
     page_size = 32
     need(isinstance(commits, list) and len(commits) <= page_size)
@@ -654,3 +773,4 @@ def load_remote(repo, token, *, now=None):
                 actual['uri'] = claim['uri']
     return state, {'checked_commit': newest, 'authenticated_snapshots': len(runs),
                    'mode': 'retained-state' if latest_claim is not None else 'verified-bootstrap' if runs else 'expired-history'}
+

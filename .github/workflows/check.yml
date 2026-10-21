@@ -11,6 +11,8 @@ on:
     - cron: '23 * * * *'
 permissions:
   contents: read
+env:
+  VPN_DIAGNOSTICS_DIR: /tmp/pipeline-diagnostics
 concurrency:
   group: checked-subscription
   cancel-in-progress: false
@@ -44,6 +46,15 @@ jobs:
           path: /tmp/frozen/
           if-no-files-found: error
           retention-days: 1
+      - name: Keep sanitized pipeline diagnosis for 14 days
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: diagnostics-prepare
+          path: /tmp/pipeline-diagnostics/diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 14
   shard:
     needs: prepare
     runs-on: ubuntu-24.04
@@ -83,6 +94,15 @@ jobs:
           path: /tmp/shard-results/
           if-no-files-found: error
           retention-days: 1
+      - name: Keep sanitized pipeline diagnosis for 14 days
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: diagnostics-shard-${{ matrix.shard }}
+          path: /tmp/pipeline-diagnostics/diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 14
   merge:
     needs: [prepare, shard]
     runs-on: ubuntu-24.04
@@ -117,6 +137,15 @@ jobs:
           path: /tmp/checked-output/
           if-no-files-found: error
           retention-days: 1
+      - name: Keep sanitized pipeline diagnosis for 14 days
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: diagnostics-merge
+          path: /tmp/pipeline-diagnostics/diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 14
   publish:
     needs: [prepare, merge]
     if: >-
@@ -146,6 +175,15 @@ jobs:
           test "$(cat /tmp/frozen/manifest.sha256)" = "$EXPECTED_MANIFEST_SHA256"
           echo "$EXPECTED_MANIFEST_SHA256  /tmp/frozen/manifest.json" | sha256sum --check --status
           python3 production.py verify-public --manifest /tmp/frozen/manifest.json --output /tmp/checked-output
+      - name: Keep sanitized pipeline diagnosis for 14 days
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: diagnostics-publish
+          path: /tmp/pipeline-diagnostics/diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Preserve checked history and publish with a concurrent-update lease
         env:
           HISTORY_COMMIT: ${{ needs.prepare.outputs.history_commit }}

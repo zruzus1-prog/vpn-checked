@@ -62,7 +62,7 @@ class HistoryBoundaryReviewTests(unittest.TestCase):
         with patch('history.remote_read', side_effect=read), self.assertRaises(ValueError):
             h.load_remote('owner/repo', None, now=datetime.now(timezone.utc))
 
-    def test_retained_node_expires_between_prepare_and_publication(self):
+    def test_near_expiry_retained_node_does_not_break_fresh_publication(self):
         item = histories.candidate(900)
         state, _, _ = histories.history_for([item], hours=(46, 40, 1))
         state['entries'][0]['last_upstream_seen_at'] = (
@@ -73,9 +73,34 @@ class HistoryBoundaryReviewTests(unittest.TestCase):
              patch('checker.download_feed', side_effect=lambda _: fixtures.feed(fixtures.uri(1))), \
              patch.dict('os.environ', {'GITHUB_EVENT_NAME': 'schedule'}):
             manifest = p.prepare(self.manifest_path, use_history=True)
+        self.assertNotIn(item['id'], {row['id'] for row in manifest['candidates']})
+        self.assertIn(item['id'], {row['id'] for row in manifest['history']['state']['entries']})
         self.run_shards(manifest, fixtures.successful_probe)
-        with self.assertRaises(ValueError):
-            p.merge(self.manifest_path, self.shards, self.output)
+        p.merge(self.manifest_path, self.shards, self.output)
+        report = p.verify_public(self.manifest_path, self.output)
+        self.assertEqual(report['history']['retained_candidates'], 0)
+        self.assertEqual(report['history']['current_candidates'], 1)
+        self.assertEqual(report['sampled'], 1)
+
+    def test_expired_retained_assessment_still_fails_independent_validator(self):
+        # Defence in depth: deliberately bypass only nomination in this fixture.
+        item = histories.candidate(900)
+        state, _, _ = histories.history_for([item], hours=(46, 40, 1))
+        state['entries'][0]['last_upstream_seen_at'] = (
+            fixtures.TEST_CLOCK[0] - timedelta(hours=48) + timedelta(seconds=1)).isoformat()
+        def unsafe_nomination(state, current_ids, at):
+            return [{k: entry[k] for k in ('id', 'uri', 'sources')}
+                    for entry in state['entries'] if entry['id'] not in current_ids]
+        with patch('history.load_remote', return_value=(state, {
+                'checked_commit': 'b' * 40, 'authenticated_snapshots': 3,
+                'mode': 'verified-bootstrap'})), \
+             patch('history.eligible_retained', side_effect=unsafe_nomination), \
+             patch('checker.download_feed', side_effect=lambda _: fixtures.feed(fixtures.uri(1))), \
+             patch.dict('os.environ', {'GITHUB_EVENT_NAME': 'schedule'}):
+            manifest = p.prepare(self.manifest_path, use_history=True)
+            self.run_shards(manifest, fixtures.successful_probe)
+            with self.assertRaisesRegex(ValueError, 'historical candidate expired before publication'):
+                p.merge(self.manifest_path, self.shards, self.output)
 
     def test_arbitrary_top_level_diagnostics_cannot_leak_secrets(self):
         manifest = self.prepare(1)
@@ -210,3 +235,4 @@ class HistoryReplayReviewTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
