@@ -73,8 +73,8 @@ def checked_ids(values, maximum):
 
 
 def _collect_current():
-    """Current six-source parser snapshot, not current network qualification."""
-    p.require(tuple(c.SOURCES) == PRODUCTION_SOURCES and len(c.SOURCES) == 6,
+    """Current five-source parser snapshot, not current network qualification."""
+    p.require(tuple(c.SOURCES) == PRODUCTION_SOURCES and len(c.SOURCES) == 5,
               'review changed production source baseline before running trial')
     normalized, provenance, sources, stats = c.collect_candidates()
     candidates = sorted(({'id': c.node_id(uri), 'uri': uri, 'sources': provenance[key]}
@@ -89,7 +89,7 @@ def _collect_current():
 
 
 def collect_current():
-    """Keep the trial comparison against the six other production sources."""
+    """Keep the trial comparison against the five other production sources."""
     previous = c.SOURCES, v.SOURCES
     try:
         c.SOURCES = list(PRODUCTION_SOURCES)
@@ -333,7 +333,7 @@ def summarize(context, manifest, report):
                                                   p.instant(context['prepared_at'])).total_seconds(), 4),
         'interpretation': [
             'Every supported Radikal candidate receives new unchanged production checks; no sample or historical pass reuse.',
-            'Novelty compares identities with current six-source candidates and up to four historical checked reports; baseline nodes were not re-probed by this trial.',
+            'Novelty compares identities with current five-source candidates and up to four historical checked reports; baseline nodes were not re-probed by this trial.',
             'Previously assessed includes prior failures; this conservative novelty metric is not a count of additions to a contemporaneously tested production feed.',
             'Reported body bytes include measured retry/failure bodies but exclude unmeasured failures, source/core downloads and protocol overhead; not total egress.',
             'Source decoded UTF-8 byte count excludes a possible removed BOM; exact original bytes are bound by source SHA-256.',

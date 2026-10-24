@@ -232,7 +232,8 @@ def validate_inventory(manifest):
                 'duplicate or mismatched candidate identity')
         provenance = candidate['sources']
         require(isinstance(provenance, list) and provenance and
-                provenance == [url for url in c.SOURCES if url in provenance],
+                provenance == [url for url in (c.SOURCES if rid in current_ids else
+                                          h.HISTORICAL_SOURCE_INVENTORY) if url in provenance],
                 'invalid candidate provenance')
         ids.add(rid)
         keys.add(key)
@@ -462,7 +463,8 @@ def validate_results(manifest, results, exports, ids, *, started_at, completed_a
         reason = row.get('reason', '')
         require(reason == '' or reason in c.RESULT_FAILURE_REASONS, 'unknown assessment reason')
         from validate_output import validate_attempts
-        validate_attempts(row)
+        validate_attempts(row, allowed_sources=(c.SOURCES if rid in manifest['history']['current_ids']
+                                               else h.HISTORICAL_SOURCE_INVENTORY))
         require(isinstance(reason, str) and reason not in ('budget', 'deep-budget') and
                 not reason.startswith('core-'), 'incomplete or infrastructure-failed assessment')
         services = row.get('service_qualified')

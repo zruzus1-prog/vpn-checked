@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from threading import Barrier, Lock
 import unittest
 from unittest.mock import Mock, patch
 import uuid
@@ -15,6 +16,7 @@ import checker as c
 import production as p
 
 TEST_CLOCK=[datetime.now(timezone.utc)-timedelta(minutes=10)]
+TEST_CLOCK_LOCK = Lock()
 
 ENV = {'GITHUB_SHA': '1' * 40, 'GITHUB_RUN_ID': '123456',
        'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_ACTIONS': 'true', 'GITHUB_OUTPUT': ''}
@@ -66,9 +68,11 @@ def successful_probe(value, core, deadline, budget, services=None):
             'http_status':status,'bytes':100,'elapsed_seconds':.1,'error':None,'curl_exit':0})
         diagnostics[name]={'label':'page-confirmed' if passed else 'http-403','http_status':status,
             'blocking_signals':[],'recognized_page':passed,'interpretation':'automated-http-test-only'}
-    TEST_CLOCK[0]=start+timedelta(seconds=52)
+    completed_at = start + timedelta(seconds=52)
+    with TEST_CLOCK_LOCK:
+        TEST_CLOCK[0] = max(TEST_CLOCK[0], completed_at)
     row={'id':c.node_id(value),'identity_version':c.CANONICALIZATION_VERSION,
-        'original_uri_sha256':p.digest(value.encode()),'checked_at':stamp,'completed_at':TEST_CLOCK[0].isoformat(),
+        'original_uri_sha256':p.digest(value.encode()),'checked_at':stamp,'completed_at':completed_at.isoformat(),
         'baseline_started_at':(start+timedelta(seconds=1)).isoformat(),'core_started':True,
         'qualified':all(services.values()),'baseline_qualified':True,'deep_tested':True,
         'service_qualified':services,'attempts':attempts,'resolved_addresses':['8.8.8.8'],'tested_address':'8.8.8.8',
@@ -107,14 +111,27 @@ class PipelineTests(unittest.TestCase):
         return manifest
 
     def run_shards(self, manifest, probe=failed_probe):
+        probed_uris = []
+        probe_lock = Lock()
+
+        def recorded_probe(value, core, deadline, budget):
+            # Mock.call_count += 1 is not thread-safe. Record exact identities
+            # under a lock, but keep the probes themselves concurrent.
+            with probe_lock:
+                probed_uris.append(value)
+            return probe(value, core, deadline, budget)
+
         with patch('checker.download_feed', side_effect=AssertionError('sources must not be fetched again')), \
              patch('checker.core_metadata', return_value=core_info()), \
              patch('production.preflight_core') as preflight, \
-             patch('checker.probe', side_effect=probe) as check:
+             patch('checker.probe', new=recorded_probe):
             for shard in manifest['shards']:
                 p.check_shard(self.manifest_path, shard['id'], self.shards, '/fake/core')
-        self.assertEqual(check.call_count, len(manifest['candidates']))
-        self.assertEqual(sum(len(call.args[0]) for call in preflight.call_args_list), len(manifest['candidates']))
+        expected_uris = [candidate['uri'] for candidate in manifest['candidates']]
+        self.assertCountEqual(probed_uris, expected_uris)
+        self.assertCountEqual(
+            [candidate['uri'] for call in preflight.call_args_list for candidate in call.args[0]],
+            expected_uris)
 
     def mutate_manifest(self, change):
         manifest = json.loads(self.manifest_path.read_text())
@@ -147,12 +164,15 @@ class PipelineTests(unittest.TestCase):
                          {'include': [{'shard': shard['id']} for shard in manifest['shards']]})
         self.assertEqual(values['manifest_sha256'], p.digest(self.manifest_path.read_bytes()))
 
-    def test_seven_source_inventory_is_required(self):
-        self.assertEqual(len(c.SOURCES), 7)
-        with patch('checker.download_feed', side_effect=[feed(uri())] * (len(c.SOURCES)-1) + [c.Rejected('offline')]):
-            with self.assertRaises(ValueError):
-                p.prepare(self.manifest_path)
-        self.assertFalse(self.manifest_path.exists())
+    def test_six_source_inventory_is_required(self):
+        self.assertEqual(len(c.SOURCES), 6)
+        for missing in range(len(c.SOURCES)):
+            responses = [feed(uri()) for _ in c.SOURCES]
+            responses[missing] = c.Rejected('offline')
+            with self.subTest(missing=missing), patch('checker.download_feed', side_effect=responses):
+                with self.assertRaisesRegex(ValueError, 'one or more sources unavailable'):
+                    p.prepare(self.manifest_path)
+            self.assertFalse(self.manifest_path.exists())
 
     def test_empty_and_over_resource_bound_fail_without_any_manifest(self):
         for count in (0, c.MAX_CANDIDATES + 1):
@@ -171,6 +191,43 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(report['coverage']['candidate_cap_skipped'], 0)
         self.assertEqual(report['production']['shard_count'], 3)
         self.assertEqual(report['feed_counts'], {'both': 0, 'chatgpt': 0, 'youtube': 0})
+
+    def test_probe_accounting_keeps_workers_concurrent(self):
+        manifest = self.prepare(8)
+        simultaneous_probes = Barrier(2)
+
+        def probe(value, core, deadline, budget):
+            simultaneous_probes.wait(timeout=5)
+            return failed_probe(value, core, deadline, budget)
+
+        with patch('checker.WORKERS', 2):
+            self.run_shards(manifest, probe)
+
+    def test_probe_accounting_rejects_duplicate_and_missing_candidate(self):
+        manifest = self.prepare(2)
+
+        def duplicate_probe(manifest_path, shard_id, output, core):
+            candidates = manifest['candidates']
+            deadline = p.time.monotonic() + 60
+            p.preflight_core(candidates, core, deadline)
+            budget = c.DeepBudget(len(candidates))
+            # The total is still correct, but the second candidate is missing.
+            for _ in candidates:
+                c.probe(candidates[0]['uri'], core, deadline, budget)
+
+        with patch('production.check_shard', new=duplicate_probe):
+            with self.assertRaises(AssertionError):
+                self.run_shards(manifest)
+
+    def test_successful_probe_clock_does_not_regress_after_later_completion(self):
+        start = TEST_CLOCK[0]
+        later_completion = start + timedelta(seconds=104)
+        TEST_CLOCK[0] = later_completion
+        # Model a worker that read the clock before another worker completed.
+        with patch('checker.utc_now', return_value=start.isoformat()):
+            result, _ = successful_probe(uri(), '/fake/core', 0, c.DeepBudget(1))
+        self.assertEqual(TEST_CLOCK[0], later_completion)
+        self.assertEqual(result['completed_at'], (start + timedelta(seconds=52)).isoformat())
 
     def test_services_keep_independent_feeds_and_do_not_carry_stale_passes(self):
         manifest = self.prepare(2)

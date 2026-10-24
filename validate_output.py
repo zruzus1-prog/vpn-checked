@@ -59,14 +59,15 @@ BLOCKING_SIGNALS = {'challenge-element','consent-form','traffic-verification-for
     'service is not available in your country')}
 
 
-def validate_attempts(row):
+def validate_attempts(row, *, allowed_sources=None):
+    allowed_sources = SOURCES if allowed_sources is None else allowed_sources
     if not isinstance(row,dict) or set(row)-ROW_KEYS: raise ValueError('unexpected result fields')
     for name in ('qualified','baseline_qualified','deep_tested','core_started'):
         if name in row and type(row[name]) is not bool: raise ValueError('invalid result flag')
     if 'original_uri_sha256' in row and not re.fullmatch('[0-9a-f]{64}',str(row['original_uri_sha256'])):
         raise ValueError('invalid original URI digest')
     if 'sources' in row and (not isinstance(row['sources'],list) or not row['sources'] or
-                            any(url not in SOURCES for url in row['sources'])):
+                            row['sources'] != [url for url in allowed_sources if url in row['sources']]):
         raise ValueError('invalid result sources')
     if 'address_limit' in row and (type(row['address_limit']) is not int or row['address_limit']!=MAX_ENDPOINT_ADDRESSES):
         raise ValueError('invalid address limit')
@@ -282,6 +283,8 @@ def validate(root, *, as_of=None, allow_legacy_split=False):
     expected={key:set() for key in FEEDS}
     ids=set();results_by_id={}
     actual_deep=0
+    from history import HISTORICAL_SOURCE_INVENTORY
+    current_ids = set(report.get('history', {}).get('current_ids', [row['id'] for row in results]))
     for row in results:
         rid=row['id']
         if not isinstance(rid,str) or not re.fullmatch('[0-9a-f]{16}',rid) or rid in ids:
@@ -293,7 +296,8 @@ def validate(root, *, as_of=None, allow_legacy_split=False):
             raise ValueError('stale node measurement')
         if row.get('reason') in ('budget','deep-budget','core-start-failed','core-stopped'):
             raise ValueError('incomplete/infrastructure failure')
-        validate_attempts(row)
+        validate_attempts(row, allowed_sources=(SOURCES if rid in current_ids
+                                               else HISTORICAL_SOURCE_INVENTORY))
         if row.get('protocol') not in PROTOCOLS: raise ValueError('invalid result protocol')
         if 'reason' in row and row['reason'] not in RESULT_FAILURE_REASONS:
             raise ValueError('invalid result reason')
@@ -373,6 +377,7 @@ def validate_history_outputs(root, report, results, now, *, allow_legacy_split=F
     for row in results:
         entry=entries.get(row['id'])
         if entry is None: raise ValueError('missing history assessment')
+        if row.get('sources') != entry['sources']: raise ValueError('history source provenance mismatch')
         observation=entry['observations'][-1]
         passed=row['service_qualified']['youtube']
         expected={'run_id':production['run_id'],'youtube':passed,

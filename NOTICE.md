@@ -45,7 +45,10 @@ disclaimer, is preserved verbatim in [licenses/apex-MIT.txt](licenses/apex-MIT.t
 The public repository's MIT notice does not grant access to or rights in its
 separate private repositories.
 
-## VovaplusEXP/p-configs
+## VovaplusEXP/p-configs (retired input)
+
+Removed from live collection on 2026-10-24 after repository/feed 404 responses.
+This notice and license remain for bounded authenticated historical data.
 
 - Upstream: <https://github.com/VovaplusEXP/p-configs>
 - Input: `Splitted-By-Protocol-Secure/vless.txt` on `main`

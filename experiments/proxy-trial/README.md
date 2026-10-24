@@ -15,14 +15,16 @@ no publish job. Do not dispatch the existing production checker for this test.
 
 ## Method and scope
 
-Six allowlisted public subscription feeds are snapshotted, parsed, and compared
+Five allowlisted public subscription feeds are snapshotted, parsed, and compared
 by canonical effective connection parameters. Display fragments are excluded
 from identity; meaningful packet encoding, SNI, credentials, paths, flow, TLS,
 and transport parameters remain part of identity. Original URI strings are kept
 unchanged in an ephemeral, mode-0600 local plan, never logged or uploaded.
 
-The original three sources are controls. The three candidate sources are the
-full igareck BLACK VLESS list, Vovaplus secure VLESS, and V2RayAggregator Eternity.
+The original three sources are controls. The two candidate sources are the
+full igareck BLACK VLESS list and V2RayAggregator Eternity. The unavailable
+Vovaplus secure VLESS feed was explicitly retired on 2026-10-24; historical
+trial results below still describe their original six-input snapshot.
 Each source contributes at most four unique supported configurations. For new
 sources, only configurations absent from all original controls are eligible.
 Within each source, supported protocols are stratified, then configurations are

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch six allowlisted public feeds and one official SHA-verified binary.
+"""Fetch five allowlisted public feeds and one official SHA-verified binary.
 
 No configuration URI is used as a download URL or executable argument here.
 """
@@ -18,7 +18,6 @@ ALLOWED={
  'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt',
  'https://raw.githubusercontent.com/Diversan313/apex-parser/main/subs/main/alive_bl.txt',
  'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt',
- 'https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt',
  'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt',
 }
 
@@ -31,7 +30,7 @@ def download(url,path,maximum,timeout,redirects=False):
 
 def main():
     manifest=json.loads((ROOT/'feeds.json').read_text())
-    if len(manifest)>6 or len({x['url'] for x in manifest})!=len(manifest):raise ValueError('Invalid manifest')
+    if len(manifest)>len(ALLOWED) or len({x['url'] for x in manifest})!=len(manifest):raise ValueError('Invalid manifest')
     (ROOT/'inputs').mkdir(exist_ok=True)
     failures=[]
     for src in manifest:

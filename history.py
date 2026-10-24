@@ -33,12 +33,27 @@ BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
                              'fcb28f217015b2fabe966b52713bcbe52bae62ad',
                              '144c2dea096443d2db6829fe0a8e61e88abdf6b2',
                              'b6ad19206976ccdc66069f929b0bb29e9cc8d82b',
-                             '5d771ea965937d6ee7db1f305f9c5680a78a35b3'}
+                             '5d771ea965937d6ee7db1f305f9c5680a78a35b3',
+                             '2e555fd711f2d3fdcc1f9ff2c3f2b2e37d106d77'}
 TWELVE_WAY_IMPLEMENTATIONS = {'b6ad19206976ccdc66069f929b0bb29e9cc8d82b'}
 LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
-# Captured allowlists, not a source list supplied by a historical report.
+# Fixed historical provenance, never a URL supplied by a report or fetched again.
+# Retired-source candidates may only survive the existing authenticated 48-hour
+# retest window; current source completeness still uses checker.SOURCES exactly.
+RETIRED_SOURCE = 'https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt'
+HISTORICAL_SOURCE_INVENTORY = (
+ 'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt',
+ 'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt',
+ 'https://raw.githubusercontent.com/Diversan313/apex-parser/main/subs/main/alive_bl.txt',
+ 'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt',
+ RETIRED_SOURCE,
+ 'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt',
+ 'https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/secure/configs.txt',
+)
 CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
-LEGACY_SOURCE_INVENTORY = CURRENT_SOURCE_INVENTORY[:-1]
+LEGACY_SOURCE_INVENTORY = HISTORICAL_SOURCE_INVENTORY[:-1]
+ARCHIVE_SOURCE_INVENTORIES = (LEGACY_SOURCE_INVENTORY, HISTORICAL_SOURCE_INVENTORY,
+                              CURRENT_SOURCE_INVENTORY)
 MAX_AGE_SECONDS = 48 * 3600
 MAX_BYTES = 48 * 1024 * 1024
 MAX_RUNS = 64
@@ -139,7 +154,7 @@ def validate(state, *, now, require_recent=False):
             need(isinstance(uri, str) and len(uri.encode()) <= MAX_URI_BYTES and entry['id'] == c.node_id(uri))
         ids.add(entry['id'])
         sources = entry['sources']
-        need(isinstance(sources, list) and sources and sources == [u for u in c.SOURCES if u in sources])
+        need(isinstance(sources, list) and sources and sources == [u for u in HISTORICAL_SOURCE_INVENTORY if u in sources])
         seen = stamp(entry['last_upstream_seen_at'])
         need(seen <= created and (created-seen).total_seconds() <= MAX_AGE_SECONDS)
         observations = entry['observations']
@@ -544,12 +559,12 @@ def authenticate_publication(repo, commit, report, token, *, now):
 
 @contextmanager
 def archived_source_inventory(report):
-    """Read-compatible exact six/seven inventories; no current-source relaxation."""
+    """Validate exact reviewed old-six, old-seven or active-six inventories."""
     import validate_output as output_validator
     sources = report.get('sources')
     need(isinstance(sources, list) and all(isinstance(source, dict) for source in sources))
     inventory = tuple(source.get('url') for source in sources)
-    need(inventory in (LEGACY_SOURCE_INVENTORY, CURRENT_SOURCE_INVENTORY))
+    need(inventory in ARCHIVE_SOURCE_INVENTORIES)
     previous = c.SOURCES, output_validator.SOURCES
     try:
         c.SOURCES = list(inventory)
@@ -742,6 +757,8 @@ def load_remote(repo, token, *, now=None):
                 need((now-at).total_seconds() > MAX_AGE_SECONDS)
                 continue
             entry = entries.setdefault(rid, {'id': rid, 'uri': None, 'sources': row['sources'], 'observations': []})
+            if not is_current:
+                need(row['sources'] == entry['sources'])
             if is_current:
                 entry['sources'] = row['sources']
                 entry['last_upstream_seen_at'] = max(snapshot['source_times'][u] for u in row['sources'])

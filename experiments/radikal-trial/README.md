@@ -4,7 +4,7 @@ This manual-only experiment evaluates
 `https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/secure/configs.txt`
 without changing production source configuration or publishing to `checked`.
 Following the successful initial trial, Radikal was added to production; this
-manual experiment continues to compare it with the six other production sources.
+manual experiment continues to compare it with the five other production sources.
 Dispatch **Isolated Radikal source trial** after reviewing its implementation.
 There is no automatic schedule, publish option, write token, billing change or
 user-device setting change.
@@ -24,7 +24,7 @@ retry limits, HTTPS probes, two full speed samples, stability window, service
 recognition, freshness, exact-manifest identity or complete-coverage requirements.
 All original candidate bytes before the display fragment remain unchanged.
 
-Prepare reads the six other production feeds as a contemporaneous parser-only novelty
+Prepare reads the five other production feeds as a contemporaneous parser-only novelty
 baseline. It also reads up to the latest four first-parent `checked` commits,
 with exact report digest and observation time. Those historical IDs mean
 previously **assessed**, including failures. No old pass is imported or labeled

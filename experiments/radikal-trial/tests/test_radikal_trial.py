@@ -59,7 +59,7 @@ class RadikalTrialTests(unittest.TestCase):
         with patch('checker.download_feed', side_effect=lambda url: feed(trial_raw if url == t.SOURCE else uri(1))) as download, \
              patch.object(t, 'capture_history', return_value=self.history()):
             result = t.prepare(self.frozen, self.head)
-        self.assertEqual(download.call_count, 7)
+        self.assertEqual(download.call_count, 6)
         self.assertIs(c.SOURCES, self.original_sources)
         self.assertEqual(c.MAX_CANDIDATES, self.original_cap)
         return result
