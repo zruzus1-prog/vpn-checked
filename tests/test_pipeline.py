@@ -164,8 +164,8 @@ class PipelineTests(unittest.TestCase):
                          {'include': [{'shard': shard['id']} for shard in manifest['shards']]})
         self.assertEqual(values['manifest_sha256'], p.digest(self.manifest_path.read_bytes()))
 
-    def test_six_source_inventory_is_required(self):
-        self.assertEqual(len(c.SOURCES), 6)
+    def test_eight_source_inventory_is_required(self):
+        self.assertEqual(len(c.SOURCES), 8)
         for missing in range(len(c.SOURCES)):
             responses = [feed(uri()) for _ in c.SOURCES]
             responses[missing] = c.Rejected('offline')

@@ -17,45 +17,47 @@ RADIKAL='https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/sec
 
 
 class SourceExpansionTests(unittest.TestCase):
-    def test_exact_six_active_sources_and_fixed_legacy_allowlists(self):
-        self.assertEqual(len(c.SOURCES),6)
+    def test_exact_eight_active_sources_and_fixed_legacy_allowlists(self):
+        self.assertEqual(len(c.SOURCES),8)
         self.assertNotIn(h.RETIRED_SOURCE,c.SOURCES)
-        self.assertEqual(c.SOURCES[-1],RADIKAL)
+        self.assertEqual(c.SOURCES[-3],RADIKAL)
         self.assertEqual(h.CURRENT_SOURCE_INVENTORY,tuple(c.SOURCES))
-        self.assertEqual(h.LEGACY_SOURCE_INVENTORY,h.HISTORICAL_SOURCE_INVENTORY[:-1])
+        self.assertEqual(h.LEGACY_SOURCE_INVENTORY,h.PRE_RETIREMENT_SOURCE_INVENTORY[:-1])
         self.assertEqual(len(h.LEGACY_SOURCE_INVENTORY),6)
-        self.assertEqual(len(h.HISTORICAL_SOURCE_INVENTORY),7)
+        self.assertEqual(len(h.HISTORICAL_SOURCE_INVENTORY),9)
         self.assertIn(h.RETIRED_SOURCE,h.LEGACY_SOURCE_INVENTORY)
         self.assertIn('2e555fd711f2d3fdcc1f9ff2c3f2b2e37d106d77',h.BOOTSTRAP_IMPLEMENTATIONS)
 
     def test_archival_scope_restores_current_inventory_even_after_failure(self):
         before=c.SOURCES,v.SOURCES
         with self.assertRaisesRegex(RuntimeError,'fixture'):
-            with h.archived_source_inventory({'sources':[{'url':url} for url in h.HISTORICAL_SOURCE_INVENTORY]}):
+            with h.archived_source_inventory({'sources':[{'url':url} for url in h.PRE_RETIREMENT_SOURCE_INVENTORY]}):
                 self.assertEqual(len(c.SOURCES),7)
                 self.assertIs(v.SOURCES,c.SOURCES)
                 raise RuntimeError('fixture')
         self.assertIs(c.SOURCES,before[0]);self.assertIs(v.SOURCES,before[1])
-        self.assertEqual(len(c.SOURCES),6)
+        self.assertEqual(len(c.SOURCES),8)
 
     def test_arbitrary_or_partial_archive_source_inventory_rejected(self):
-        inventories=[c.SOURCES[:5],list(reversed(c.SOURCES)),c.SOURCES[:6]+['https://attacker.invalid/feed']]
+        inventories=[c.SOURCES[:-1], c.SOURCES[:-2]+c.SOURCES[-1:], c.SOURCES[:5],list(reversed(c.SOURCES)),c.SOURCES[:6]+['https://attacker.invalid/feed']]
         for inventory in inventories:
             with self.subTest(inventory=inventory),self.assertRaises(ValueError):
                 with h.archived_source_inventory({'sources':[{'url':url} for url in inventory]}):
                     self.fail('untrusted source inventory admitted')
 
     def test_new_identity_is_explicit_diversity_trial_after_one_fresh_pass(self):
-        item=fixtures.candidate(900);item['sources']=[RADIKAL]
-        state=h.empty(fixtures.NOW.isoformat())
-        result=fixtures.row(item)
-        state=h.update(state,[item],[result],at=fixtures.NOW.isoformat(),implementation_sha='1'*40,
-                       run_id='1234',run_attempt='1',event='schedule')
-        split,proof=h.split(state,[result],{item['id']:item['uri']})
-        self.assertEqual(split,{'stable':[item['uri']],'reserve':[]})
-        self.assertFalse(proof['evidence'][item['id']]['eligible'])
-        self.assertEqual(proof['evidence'][item['id']]['tier'],'fresh-diversity')
-        self.assertEqual(proof['selection']['selected_tier_counts']['fresh-diversity'],1)
+        for source in h.ADDED_SOURCE_INVENTORY:
+            with self.subTest(source=source):
+                item=fixtures.candidate(900);item['sources']=[source]
+                state=h.empty(fixtures.NOW.isoformat())
+                result=fixtures.row(item)
+                state=h.update(state,[item],[result],at=fixtures.NOW.isoformat(),implementation_sha='1'*40,
+                               run_id='1234',run_attempt='1',event='schedule')
+                split,proof=h.split(state,[result],{item['id']:item['uri']})
+                self.assertEqual(split,{'stable':[item['uri']],'reserve':[]})
+                self.assertFalse(proof['evidence'][item['id']]['eligible'])
+                self.assertEqual(proof['evidence'][item['id']]['tier'],'fresh-diversity')
+                self.assertEqual(proof['selection']['selected_tier_counts']['fresh-diversity'],1)
 
     def test_experimental_run_cannot_authenticate_production_history(self):
         report,commit,run,jobs=fixtures.AuthenticationTests().fixtures()
@@ -68,8 +70,22 @@ class RetiredSourceReplayTests(unittest.TestCase):
     setUp = pipeline.PipelineTests.setUp
     run_shards = pipeline.PipelineTests.run_shards
 
+    def test_each_added_source_failure_stops_prepare_before_history(self):
+        for failed in h.ADDED_SOURCE_INVENTORY:
+            with self.subTest(source=failed):
+                def download(url):
+                    if url == failed:
+                        raise OSError('unavailable')
+                    return pipeline.feed(pipeline.uri())
+                with patch('checker.download_feed', side_effect=download), \
+                     patch('history.load_remote') as history_read, \
+                     self.assertRaisesRegex(ValueError, 'sources unavailable'):
+                    p.prepare(self.manifest_path, use_history=True)
+                history_read.assert_not_called()
+                self.assertFalse(self.manifest_path.exists())
+
     def publications(self):
-        """Real old-six -> old-seven -> active-six -> next-active-six artifacts."""
+        """Real old-six -> old-seven -> active-six -> active-eight -> next-eight artifacts."""
         class Clock(datetime):
             @classmethod
             def now(cls, tz=None):
@@ -82,9 +98,10 @@ class RetiredSourceReplayTests(unittest.TestCase):
             data = remote[url]
             self.assertLessEqual(len(data), maximum)
             return data
-        inventories = (h.LEGACY_SOURCE_INVENTORY, h.HISTORICAL_SOURCE_INVENTORY,
+        inventories = (h.LEGACY_SOURCE_INVENTORY, h.PRE_RETIREMENT_SOURCE_INVENTORY,
+                       h.POST_RETIREMENT_SOURCE_INVENTORY,
                        h.CURRENT_SOURCE_INVENTORY, h.CURRENT_SOURCE_INVENTORY)
-        for index, (hours, inventory) in enumerate(zip((36, 30, 4, 1), inventories)):
+        for index, (hours, inventory) in enumerate(zip((36, 30, 6, 4, 1), inventories)):
             pipeline.TEST_CLOCK[0] = now - timedelta(hours=hours)
             implementation = '2e555fd711f2d3fdcc1f9ff2c3f2b2e37d106d77' if index < 2 else '1' * 40
             def download(url):
@@ -92,6 +109,8 @@ class RetiredSourceReplayTests(unittest.TestCase):
                     self.assertNotEqual(url, h.RETIRED_SOURCE)
                 # One retired-only, one mixed, one active-only identity.
                 values = (900, 901) if url == h.RETIRED_SOURCE else (1, 901)
+                if url in h.ADDED_SOURCE_INVENTORY and index == 3:
+                    values = (1, 901, 902)
                 return pipeline.feed('\n'.join(pipeline.uri(i) for i in values))
             if not index:
                 state = h.empty(pipeline.TEST_CLOCK[0].isoformat())
@@ -142,7 +161,7 @@ class RetiredSourceReplayTests(unittest.TestCase):
         now, remote, root, manifests, read = self.publications()
         retired_id = c.node_id(pipeline.uri(900))
         mixed_id = c.node_id(pipeline.uri(901))
-        for manifest in manifests[2:]:
+        for manifest in manifests[3:]:
             self.assertEqual([x['url'] for x in manifest['sources']], c.SOURCES)
             self.assertNotIn(retired_id, manifest['history']['current_ids'])
             retired = next(x for x in manifest['candidates'] if x['id'] == retired_id)
@@ -157,9 +176,29 @@ class RetiredSourceReplayTests(unittest.TestCase):
             self.assertEqual(replayed, h.prune(published, at))
         retired = next(x for x in published['entries'] if x['id'] == retired_id)
         self.assertEqual(retired['last_upstream_seen_at'], (now - timedelta(hours=30)).isoformat())
-        self.assertEqual(len(retired['observations']), 4)
+        self.assertEqual(len(retired['observations']), 5)
         nominated, _ = h.nominate(published, [], (now + timedelta(hours=16, seconds=1)).isoformat())
         self.assertNotIn(retired_id, {x['id'] for x in nominated})
+
+    def test_expansion_replay_deduplicates_overlap_and_retains_new_source_history(self):
+        now, remote, root, manifests, read = self.publications()
+        self.assertEqual([len(m['sources']) for m in manifests], [6, 7, 6, 8, 8])
+        new_id = c.node_id(pipeline.uri(902))
+        mixed_id = c.node_id(pipeline.uri(901))
+        self.assertNotIn(new_id, manifests[2]['history']['current_ids'])
+        self.assertIn(new_id, manifests[3]['history']['current_ids'])
+        self.assertNotIn(new_id, manifests[4]['history']['current_ids'])
+        for manifest in manifests[3:]:
+            new = next(x for x in manifest['candidates'] if x['id'] == new_id)
+            self.assertEqual(new['sources'], list(h.ADDED_SOURCE_INVENTORY))
+            mixed = [x for x in manifest['candidates'] if x['id'] == mixed_id]
+            self.assertEqual(len(mixed), 1)
+            self.assertEqual(mixed[0]['sources'], c.SOURCES)
+        with patch('history.remote_read', side_effect=read):
+            replayed, _ = h.load_remote('owner/repo', None, now=now)
+        new = next(x for x in replayed['entries'] if x['id'] == new_id)
+        self.assertEqual(len(new['observations']), 2)
+        self.assertEqual(new['last_upstream_seen_at'], (now-timedelta(hours=4)).isoformat())
 
     def test_retired_source_cannot_be_claimed_as_current_or_change_retained_provenance(self):
         _, _, _, manifests, _ = self.publications()
@@ -190,10 +229,10 @@ class RetiredSourceReplayTests(unittest.TestCase):
         from pathlib import Path
         import tempfile
         now, remote, _, _, read = self.publications()
-        # Alter the first active-six publication, not the latest cumulative
+        # Alter the first active-eight publication, not the latest cumulative
         # claim. Rehash and rerank its matching row/state claims so standalone
         # validation succeeds; replay must still bind to the earlier source.
-        root = 'https://raw.githubusercontent.com/owner/repo/' + f'{3:040x}' + '/'
+        root = 'https://raw.githubusercontent.com/owner/repo/' + f'{4:040x}' + '/'
         report = h.strict_json(remote[root + 'report.json'])
         state = h.strict_json(remote[root + 'history.json'])
         retired_id = c.node_id(pipeline.uri(900))

@@ -29,6 +29,8 @@ SOURCES = [
  'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt',
  'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt',
  'https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/secure/configs.txt',
+ 'https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt',
+ 'https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/main/configs.txt',
 ]
 MAX_CANDIDATES = 4096
 WORKERS = 4

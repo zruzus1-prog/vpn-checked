@@ -41,7 +41,7 @@ LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Retired-source candidates may only survive the existing authenticated 48-hour
 # retest window; current source completeness still uses checker.SOURCES exactly.
 RETIRED_SOURCE = 'https://raw.githubusercontent.com/VovaplusEXP/p-configs/main/Splitted-By-Protocol-Secure/vless.txt'
-HISTORICAL_SOURCE_INVENTORY = (
+PRE_RETIREMENT_SOURCE_INVENTORY = (
  'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt',
  'https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt',
  'https://raw.githubusercontent.com/Diversan313/apex-parser/main/subs/main/alive_bl.txt',
@@ -50,10 +50,18 @@ HISTORICAL_SOURCE_INVENTORY = (
  'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt',
  'https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/secure/configs.txt',
 )
-CURRENT_SOURCE_INVENTORY = tuple(c.SOURCES)
-LEGACY_SOURCE_INVENTORY = HISTORICAL_SOURCE_INVENTORY[:-1]
-ARCHIVE_SOURCE_INVENTORIES = (LEGACY_SOURCE_INVENTORY, HISTORICAL_SOURCE_INVENTORY,
-                              CURRENT_SOURCE_INVENTORY)
+# Keep exact past feed inventories independent of the live source list.
+LEGACY_SOURCE_INVENTORY = PRE_RETIREMENT_SOURCE_INVENTORY[:-1]
+POST_RETIREMENT_SOURCE_INVENTORY = tuple(
+    url for url in PRE_RETIREMENT_SOURCE_INVENTORY if url != RETIRED_SOURCE)
+ADDED_SOURCE_INVENTORY = (
+ 'https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt',
+ 'https://raw.githubusercontent.com/flaafix/AetrisVPN-black-list/main/configs.txt',
+)
+HISTORICAL_SOURCE_INVENTORY = PRE_RETIREMENT_SOURCE_INVENTORY + ADDED_SOURCE_INVENTORY
+CURRENT_SOURCE_INVENTORY = POST_RETIREMENT_SOURCE_INVENTORY + ADDED_SOURCE_INVENTORY
+ARCHIVE_SOURCE_INVENTORIES = (LEGACY_SOURCE_INVENTORY, PRE_RETIREMENT_SOURCE_INVENTORY,
+                              POST_RETIREMENT_SOURCE_INVENTORY, CURRENT_SOURCE_INVENTORY)
 MAX_AGE_SECONDS = 48 * 3600
 MAX_BYTES = 48 * 1024 * 1024
 MAX_RUNS = 64
@@ -559,7 +567,7 @@ def authenticate_publication(repo, commit, report, token, *, now):
 
 @contextmanager
 def archived_source_inventory(report):
-    """Validate exact reviewed old-six, old-seven or active-six inventories."""
+    """Validate only exact reviewed six, seven or eight source inventories."""
     import validate_output as output_validator
     sources = report.get('sources')
     need(isinstance(sources, list) and all(isinstance(source, dict) for source in sources))
