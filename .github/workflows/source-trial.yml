@@ -24,8 +24,8 @@ jobs:
           persist-credentials: false
       - name: Offline regression and isolated experiment tests
         run: |
-          python3 -m unittest discover -s tests -v
-          python3 -m unittest discover -s experiments/source-trial -p 'test_*.py' -v
+          env -u GITHUB_EVENT_NAME python3 -m unittest discover -s tests -v
+          env -u GITHUB_EVENT_NAME python3 -m unittest discover -s experiments/source-trial -p 'test_*.py' -v
       - name: Official checksum-pinned core
         run: python3 fetch_core.py
       - name: Parser conformance to pinned core
