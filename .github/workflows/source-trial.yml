@@ -1,0 +1,44 @@
+name: Isolated NoMoreWalls and Aetris sample
+on:
+  push:
+    branches: ['experiment/sources-20261105']
+    paths:
+      - '.github/workflows/source-trial.yml'
+      - 'experiments/source-trial/**'
+permissions:
+  contents: read
+concurrency:
+  group: isolated-sources-20261105
+  cancel-in-progress: false
+jobs:
+  trial:
+    if: github.ref == 'refs/heads/experiment/sources-20261105'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Offline regression and isolated experiment tests
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m unittest discover -s experiments/source-trial -p 'test_*.py' -v
+      - name: Official checksum-pinned core
+        run: python3 fetch_core.py
+      - name: Parser conformance to pinned core
+        run: SING_BOX_TEST_BIN="$PWD/bin/sing-box" python3 -m unittest discover -s tests -p test_parser_compat.py -v
+      - name: Interleaved baseline and novel source samples with unchanged strict probes
+        run: python3 experiments/source-trial/trial.py
+      - name: Credential-free diagnostic artifacts only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: isolated-source-trial-diagnostics
+          path: |
+            /tmp/source-trial-output/plan.json
+            /tmp/source-trial-output/report.json
+          if-no-files-found: warn
+          retention-days: 3
