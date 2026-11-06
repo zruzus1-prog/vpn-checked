@@ -103,7 +103,8 @@ class RetiredSourceReplayTests(unittest.TestCase):
                        h.CURRENT_SOURCE_INVENTORY, h.CURRENT_SOURCE_INVENTORY)
         for index, (hours, inventory) in enumerate(zip((36, 30, 6, 4, 1), inventories)):
             pipeline.TEST_CLOCK[0] = now - timedelta(hours=hours)
-            implementation = '2e555fd711f2d3fdcc1f9ff2c3f2b2e37d106d77' if index < 2 else '1' * 40
+            implementation = ('2e555fd711f2d3fdcc1f9ff2c3f2b2e37d106d77' if index < 2 else
+                              '86c5a9b889a43c7d17a7939611fa9e1da2b6e822' if index == 2 else '1' * 40)
             def download(url):
                 if index >= 2:
                     self.assertNotEqual(url, h.RETIRED_SOURCE)
