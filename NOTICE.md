@@ -101,6 +101,32 @@ these repository licenses do not establish that every third-party endpoint is
 authorized, trustworthy or lawful to use in every jurisdiction. No rights to
 third-party infrastructure or trademarks are granted by this notice.
 
+## NoMoreWalls and Aetris subscription data (2026-11-06)
+
+- NoMoreWalls: <https://github.com/peasoft/NoMoreWalls>, input
+  `master/list_raw.txt`. Its [LICENSE.md](https://github.com/peasoft/NoMoreWalls/blob/master/LICENSE.md)
+  covers files and related content, not only program source. The exact Anti-996
+  version 1.0 text, including `版权所有（c）2023 peasoft`, is preserved in
+  [licenses/nomorewalls-Anti-996.md](licenses/nomorewalls-Anti-996.md), upstream
+  blob `7695ee33c4300c4c85d7b68381a8bfe96d8a8025`. It requires preserving the
+  copyright and license and imposes labor-law and employee-rights conditions.
+  Read that license before using or redistributing covered material.
+- Aetris: <https://github.com/flaafix/AetrisVPN-black-list>, input `main/configs.txt`.
+  As reviewed on 2026-11-06, no explicit redistribution license was present.
+  Its workflow mirrors a Google Drive document; its README explains connecting
+  public Raw links in clients but does not establish a general redistribution
+  grant. The provenance and rights of the underlying configurations remain
+  uncertain. No license or permission from endpoint operators is asserted here.
+
+Only machine-readable candidate connection URIs are processed, normalized,
+filtered and freshly tested. No upstream implementation, prose, routing rules,
+DNS rules or client configuration is imported. URI fragments may retain upstream
+labels. The checker's GPL-3.0-only license does not purport to relicense these
+third-party data or to resolve the compatibility or scope of upstream rights.
+Redistributors must assess the applicable terms independently and preserve
+these notices and the complete included license texts. Successful HTTP probes
+are not a finding of endpoint safety, ownership or permission to use a server.
+
 ## External runtime: sing-box
 
 The checker invokes a separately obtained sing-box executable. No sing-box binary
