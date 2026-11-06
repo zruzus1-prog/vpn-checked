@@ -9,6 +9,7 @@ on:
         default: false
   schedule:
     - cron: '23 * * * *'
+    - cron: '53 * * * *'
 permissions:
   contents: read
 env:
@@ -19,10 +20,12 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 105
     permissions:
       contents: read
       actions: read
+    env:
+      CADENCE_PUBLISH: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)) }}
     outputs:
       history_commit: ${{ steps.freeze.outputs.history_commit }}
       matrix: ${{ steps.freeze.outputs.matrix }}
@@ -33,12 +36,22 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Offline tests
+        timeout-minutes: 5
         run: python3 -m unittest discover -s tests -v
+      - name: Authenticate history and reserve the next hourly snapshot slot
+        timeout-minutes: 15
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 cadence_limiter.py reserve --ticket /tmp/cadence-slot.json
+      - name: Wait within the shared publication lock
+        timeout-minutes: 62
+        run: python3 cadence_limiter.py wait --ticket /tmp/cadence-slot.json
       - name: Freeze current sources and authenticated 48-hour retest history
+        timeout-minutes: 15
         id: freeze
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 production.py prepare --history --manifest /tmp/frozen/manifest.json
+        run: python3 cadence_limiter.py prepare --ticket /tmp/cadence-slot.json --manifest /tmp/frozen/manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
