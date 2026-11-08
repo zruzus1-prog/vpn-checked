@@ -2,10 +2,59 @@
 """Download only a fixed official archive and verify its pinned digest before extraction."""
 import hashlib
 import json
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+import time
+
+
+def retry_delay(error, attempt):
+    """Only retry selected transport/HTTP failures, never TLS or local errors."""
+    status, _, retry_after = (error.stdout or '').partition('\n')
+    if not (len(status) == 3 and status.isascii() and status.isdigit()):
+        return None
+    if not (error.returncode in (28, 56) or
+            (error.returncode == 22 and status in {'408', '429', '500', '502', '503', '504'})):
+        return None
+    delay = 2 ** attempt
+    retry_after = retry_after.strip()
+    if retry_after:
+        if retry_after.isascii() and retry_after.isdigit():
+            if len(retry_after) > 10:
+                return None
+            delay = max(delay, int(retry_after))
+        else:
+            try:
+                date = parsedate_to_datetime(retry_after)
+                if date.tzinfo is None:
+                    return None
+                delay = max(delay, date.timestamp() - time.time())
+            except (ValueError, TypeError, OverflowError):
+                return None
+    return delay
+
+
+def download(url, archive):
+    # Python owns the only retry loop: three attempts total, with one deadline.
+    # Capture only final response metadata; the archive still goes to its file.
+    command = ['curl','--disable','--fail','--silent','--show-error','--location','--proto','=https','--proto-redir','=https','--proxy','','--max-time','60','--max-filesize','80000000','--write-out','%{http_code}\n%header{retry-after}','--output',str(archive),url]
+    deadline = time.monotonic() + 190
+    for attempt in range(3):
+        archive.unlink(missing_ok=True)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, 190)
+        try:
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, text=True,
+                           timeout=min(65, remaining))
+            return
+        except subprocess.CalledProcessError as error:
+            delay = retry_delay(error, attempt)
+            if attempt == 2 or delay is None or time.monotonic() + delay >= deadline:
+                raise
+            time.sleep(delay)
 
 
 def install():
@@ -18,7 +67,7 @@ def install():
     url=f'https://github.com/SagerNet/sing-box/releases/download/v{version}/{filename}'
     with tempfile.TemporaryDirectory() as td:
         archive=Path(td)/'core.tar.gz'
-        subprocess.run(['curl','--disable','--fail','--silent','--show-error','--location','--proto','=https','--proto-redir','=https','--proxy','','--max-time','60','--max-filesize','80000000','--output',str(archive),url],check=True,timeout=65)
+        download(url, archive)
         if hashlib.sha256(archive.read_bytes()).hexdigest()!=digest:
             raise ValueError('core checksum mismatch')
         with tarfile.open(archive,'r:gz') as tar:
