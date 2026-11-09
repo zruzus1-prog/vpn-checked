@@ -138,7 +138,7 @@ class IntegrationTests(unittest.TestCase):
         text=(Path(l.__file__).parent/'.github/workflows/check.yml').read_text()
         self.assertIn("- cron: '23 * * * *'",text);self.assertIn("- cron: '53 * * * *'",text)
         self.assertIn('group: checked-subscription\n  cancel-in-progress: false',text)
-        self.assertIn('timeout-minutes: 105',text)
+        self.assertIn('timeout-minutes: 111',text)
         self.assertIn('timeout-minutes: 62',text)
         self.assertEqual(text.count('continue-on-error: true'),4)
         self.assertIn('git push --force-with-lease="refs/heads/checked:$expected"',text)

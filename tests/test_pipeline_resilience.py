@@ -120,7 +120,7 @@ class SafeDiagnosticsTests(unittest.TestCase):
 
     def test_only_sanitized_fixed_file_has_longer_retention(self):
         text = (Path(p.__file__).parent/'.github/workflows/check.yml').read_text()
-        self.assertEqual(text.count('retention-days: 1\n'), 3)
+        self.assertEqual(text.count('retention-days: 1\n'), 4)
         self.assertEqual(text.count('retention-days: 14\n'), 4)
         self.assertEqual(text.count('path: /tmp/pipeline-diagnostics/diagnostic.json'), 4)
         self.assertNotIn('path: /tmp/pipeline-diagnostics/\n', text)

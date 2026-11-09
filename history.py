@@ -37,7 +37,8 @@ BOOTSTRAP_IMPLEMENTATIONS = {'8601c067ce2f7dde936b17808b7bf58906131d19',
                              '2e555fd711f2d3fdcc1f9ff2c3f2b2e37d106d77',
                              '86c5a9b889a43c7d17a7939611fa9e1da2b6e822',
                              'efbc10a5eb4b7f0d3b67934b4c971f7bbe6beb6e',
-                             '0df1fc752a9640937af4b04f490fdddce7d86420'}
+                             '0df1fc752a9640937af4b04f490fdddce7d86420',
+                             'b4d1581f5b035acac4d5dc08aca373d4d0aecf09'}
 TWELVE_WAY_IMPLEMENTATIONS = {'b6ad19206976ccdc66069f929b0bb29e9cc8d82b'}
 LEGACY_SPLIT_IMPLEMENTATIONS = {'976c84b3a09bb8a7decc1c623726f28749720986'}
 # Fixed historical provenance, never a URL supplied by a report or fetched again.

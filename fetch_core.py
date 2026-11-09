@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Download only a fixed official archive and verify its pinned digest before extraction."""
+"""Download or reuse the fixed official archive; verify its pin before extraction."""
+import argparse
 import hashlib
+import io
 import json
 from email.utils import parsedate_to_datetime
+import os
 from pathlib import Path
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -57,20 +61,53 @@ def download(url, archive):
             time.sleep(delay)
 
 
-def install():
+def core_lock():
     lock=json.loads(Path('core-lock.json').read_text())
     version=lock['version']; digest=lock['sha256']
     import re
     if not re.fullmatch(r'\d+\.\d+\.\d+',version) or not re.fullmatch(r'[0-9a-f]{64}',digest):
         raise ValueError('invalid core lock; refuse download')
-    filename=f'sing-box-{version}-linux-amd64.tar.gz'
-    url=f'https://github.com/SagerNet/sing-box/releases/download/v{version}/{filename}'
+    return version, digest
+
+
+def verified_archive(path, digest):
+    # Hash and extract the same bounded bytes, not a path that can change between
+    # verification and extraction. Reject symlinks and nonregular local inputs.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 80000000:
+            raise ValueError('invalid core archive')
+        data = stream.read(80000001)
+    if len(data) > 80000000:
+        raise ValueError('invalid core archive')
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError('core checksum mismatch')
+    return data
+
+
+def install(archive_path=None, download_only=None):
+    if archive_path is not None and download_only is not None:
+        raise ValueError('choose a local archive or download-only destination')
+    version, digest = core_lock()
     with tempfile.TemporaryDirectory() as td:
-        archive=Path(td)/'core.tar.gz'
-        download(url, archive)
-        if hashlib.sha256(archive.read_bytes()).hexdigest()!=digest:
-            raise ValueError('core checksum mismatch')
-        with tarfile.open(archive,'r:gz') as tar:
+        if archive_path is None:
+            filename=f'sing-box-{version}-linux-amd64.tar.gz'
+            url=f'https://github.com/SagerNet/sing-box/releases/download/v{version}/{filename}'
+            archive=Path(td)/'core.tar.gz'
+            download(url, archive)
+        else:
+            # Explicit offline mode: missing or corrupt artifacts fail closed.
+            # Never fall back to one external download per shard.
+            archive=Path(archive_path)
+        archive_bytes = verified_archive(archive, digest)
+        if download_only is not None:
+            destination=Path(download_only)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(archive_bytes)
+            print('Official core archive verified and prepared for this run.')
+            return
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode='r:gz') as tar:
             member=tar.getmember(f'sing-box-{version}-linux-amd64/sing-box')
             if not member.isfile() or member.size>100000000: raise ValueError('invalid core member')
             data=tar.extractfile(member).read()
@@ -81,4 +118,15 @@ def install():
             'binary_sha256':hashlib.sha256(data).hexdigest()},sort_keys=True)+'\n')
     print('Official core archive verified; no proxy connections made by installer.')
 
-if __name__=='__main__': install()
+def main(argv=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument('--archive', type=Path,
+                      help='install from this local archive, with no network fallback')
+    mode.add_argument('--download-only', type=Path,
+                      help='download and verify an archive for sharing; do not install')
+    args=parser.parse_args(argv)
+    install(archive_path=args.archive, download_only=args.download_only)
+
+
+if __name__=='__main__': main()

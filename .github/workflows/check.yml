@@ -20,7 +20,7 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 105
+    timeout-minutes: 111
     permissions:
       contents: read
       actions: read
@@ -30,6 +30,7 @@ jobs:
       history_commit: ${{ steps.freeze.outputs.history_commit }}
       matrix: ${{ steps.freeze.outputs.matrix }}
       manifest_sha256: ${{ steps.freeze.outputs.manifest_sha256 }}
+      core_artifact_id: ${{ steps.core-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -46,6 +47,19 @@ jobs:
       - name: Wait within the shared publication lock
         timeout-minutes: 62
         run: python3 cadence_limiter.py wait --ticket /tmp/cadence-slot.json
+      - name: Download and verify the pinned official core once for all shards
+        timeout-minutes: 4
+        run: python3 fetch_core.py --download-only /tmp/pinned-core/core.tar.gz
+      - name: Share the exact verified archive within this run
+        id: core-artifact
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pinned-core-${{ github.run_attempt }}
+          path: /tmp/pinned-core/core.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
       - name: Freeze current sources and authenticated 48-hour retest history
         timeout-minutes: 15
         id: freeze
@@ -93,8 +107,18 @@ jobs:
         run: |
           test "$(cat /tmp/frozen/manifest.sha256)" = "$EXPECTED_MANIFEST_SHA256"
           echo "$EXPECTED_MANIFEST_SHA256  /tmp/frozen/manifest.json" | sha256sum --check --status
-      - name: Install checksum-pinned official core
-        run: python3 fetch_core.py
+      - name: Require one exact prepare-stage core artifact ID
+        env:
+          CORE_ARTIFACT_ID: ${{ needs.prepare.outputs.core_artifact_id }}
+        run: '[[ "$CORE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - name: Download the prepare-stage core artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.core_artifact_id }}
+          path: /tmp/pinned-core
+          merge-multiple: true
+      - name: Independently verify and install the checksum-pinned core
+        run: python3 fetch_core.py --archive /tmp/pinned-core/core.tar.gz
       - name: Synthetic new-parser conformance against the pinned binary
         run: SING_BOX_TEST_BIN="$PWD/bin/sing-box" python3 -m unittest discover -s tests -p test_parser_compat.py -v
       - name: Preflight core schema and check every frozen shard candidate

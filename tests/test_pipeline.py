@@ -441,7 +441,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('git merge-base --is-ancestor "$expected" HEAD', text)
         self.assertEqual(text.count('ref: ${{ github.sha }}'), 4)
         self.assertEqual(text.count('persist-credentials: false'), 3)
-        self.assertEqual(text.count('retention-days: 1\n'), 3)
+        self.assertEqual(text.count('retention-days: 1\n'), 4)
         for action in re.findall(r'uses: ([^\s#]+)', text):
             self.assertRegex(action, r'@(?:[0-9a-f]{40})$')
         publish = text.rsplit('\n  publish:\n', 1)[1]
